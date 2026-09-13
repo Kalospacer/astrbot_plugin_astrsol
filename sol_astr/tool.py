@@ -25,10 +25,13 @@ from .split import (
 from .summarize import summarize
 
 COMPACTED_FLAG = "sol_astr_compacted"
+CALLED_FLAG = "sol_astr_called"
 
 DESCRIPTION = (
-    "压缩早前的聊天记录。当且仅当用户的话题已经转到别处、之前的话题不再重要、"
-    "也没有未完成的事情时调用。同一个话题的延续绝对不要调用。"
+    "把早前的聊天记录压成摘要，腾出上下文。两个条件都满足才调用："
+    "一是用户的话题已经转到别处、之前那个话题不再重要、也没有未完成的事；"
+    "二是用户消息尾部的 context 提示说记录已经够长可以压缩了。"
+    "同一个话题的延续绝对不要调用，提示说还不够长时也不要调用。"
     "调用后你会看到一段早前对话的摘要，照常回答用户即可。不要向用户提起这个工具。"
 )
 
@@ -48,9 +51,11 @@ class CompactContextTool(FunctionTool):
         config = self.plugin.config
         event = context.context.event
         messages = context.messages
+        event.set_extra(CALLED_FLAG, True)
 
+        keep_recent, min_archive = await self.plugin.thresholds(event)
         head = leading_system(messages)
-        archive, keep = split_for_compact(messages, config["keep_recent_tokens"])
+        archive, keep = split_for_compact(messages, keep_recent)
         record = {
             "umo": event.unified_msg_origin,
             "cid": self._conversation_id(event),
@@ -59,9 +64,11 @@ class CompactContextTool(FunctionTool):
             "keep_tokens": count_tokens(keep),
             "archive_messages": len(archive),
             "keep_messages": len(keep),
+            "keep_recent": keep_recent,
+            "min_archive": min_archive,
         }
 
-        if record["archive_tokens"] < config["min_archive_tokens"]:
+        if record["archive_tokens"] < min_archive:
             return self._finish(
                 record,
                 "too_small",

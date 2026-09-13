@@ -13,15 +13,15 @@
   },
   "keep_recent_tokens": {
     "type": "int",
-    "description": "绝对保留的最近上下文 token 数",
-    "hint": "压缩时按整轮保留最近这么多 token，绝对值，与窗口大小无关。保留段越大，压缩越不划算（压缩后首轮要按未命中价重建它）。",
-    "default": 40000
+    "description": "保留最近多少 token（0 = 按模型窗口自动算）",
+    "hint": "压缩时按整轮保留最近这么多 token。0 表示自动：取窗口的 15%，最多 40000。保留段越大压缩越不划算，因为压缩后首轮要按未命中价重建它。",
+    "default": 0
   },
   "min_archive_tokens": {
     "type": "int",
-    "description": "最小归档段 token 数",
-    "hint": "切分后待摘要的旧段小于此值则不压缩。它加上「保留最近 token 数」就是实际起压门槛，默认 100k。归档段必须远大于保留段才划算。",
-    "default": 60000
+    "description": "归档段至少多少 token 才压（0 = 按模型窗口自动算）",
+    "hint": "0 表示自动：取窗口的 25%，最多 60000。它加上保留段就是起压门槛，会写在每轮的 context 提示里告诉模型。归档段必须远大于保留段才划算。",
+    "default": 0
   },
   "strip_tool_trace": {
     "type": "bool",

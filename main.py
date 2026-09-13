@@ -10,16 +10,27 @@ from astrbot.core.agent.message import TextPart, bind_checkpoint_messages
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 
-from .sol_astr.split import count_tokens, strip_tool_trace
+from .sol_astr import ledger
+from .sol_astr.split import TOOL_NAME, count_tokens, strip_tool_trace
 from .sol_astr.summarize import DEFAULT_INSTRUCTION
-from .sol_astr.tool import COMPACTED_FLAG, CompactContextTool
+from .sol_astr.tool import CALLED_FLAG, COMPACTED_FLAG, CompactContextTool
+
+ELIGIBLE_FLAG = "sol_astr_eligible"
+
+# 自动阈值：按窗口取比例，再用绝对值封顶。
+# 比例保证小窗口模型也够得着（否则绝对阈值就是死值），封顶保证大窗口不会傻到
+# 留着 150k 不压——那时压缩等于没压。
+KEEP_RATIO, KEEP_CAP = 0.15, 40000
+ARCHIVE_RATIO, ARCHIVE_CAP = 0.25, 60000
 
 
 class SoLAstr(Star):
     def __init__(self, context: Context, config: dict) -> None:
         super().__init__(context)
         self.config = config
-        self.ledger_path = StarTools.get_data_dir("astrbot_plugin_astrsol") / "ledger.jsonl"
+        self.ledger_path = (
+            StarTools.get_data_dir("astrbot_plugin_astrsol") / "ledger.jsonl"
+        )
         self.tool = CompactContextTool(plugin=self)
         self.enabled = False
 
@@ -82,13 +93,40 @@ class SoLAstr(Star):
             )
         return await self.context.get_using_provider_async(umo=event.unified_msg_origin)
 
+    async def thresholds(self, event: AstrMessageEvent) -> tuple[int, int]:
+        """本次会话的 (保留段, 最小归档段)。配置留 0 就按当前模型的窗口算。
+
+        窗口直接读核心解析好的结果：build_main_agent 在 on_llm_request 之前就把
+        provider 配置 / models.dev 元数据 / fallback_max_tokens 归一到了
+        provider_config["max_context_tokens"]（astr_main_agent.py:1674-1684）。
+        """
+        keep = self.config["keep_recent_tokens"]
+        archive = self.config["min_archive_tokens"]
+        if keep and archive:
+            return keep, archive
+
+        provider = await self.context.get_using_provider_async(
+            umo=event.unified_msg_origin
+        )
+        window = (
+            provider.provider_config.get("max_context_tokens", 0) if provider else 0
+        )
+        window = window or self._compression_config().get("fallback_max_tokens", 128000)
+        return (
+            keep or min(KEEP_CAP, int(window * KEEP_RATIO)),
+            archive or min(ARCHIVE_CAP, int(window * ARCHIVE_RATIO)),
+        )
+
     @filter.on_llm_request()
     async def inject_context_size(
         self,
         event: AstrMessageEvent,
         req: ProviderRequest,
     ) -> None:
-        """在当轮用户消息尾部追加一行上下文规模，供模型判断该不该压缩。
+        """在当轮用户消息尾部追加一行上下文状态。
+
+        体积判断交给插件、语义判断留给模型：裸报一个 token 数模型无从判断算大算小，
+        所以这里连门槛一起给，够大了再明说可以压。
 
         放在消息尾部而不是 system prompt，是为了不破坏上游的前缀缓存；这一行会随
         历史落盘，不要剥离，否则下一轮的前缀又和缓存对不上了。
@@ -98,27 +136,47 @@ class SoLAstr(Star):
         tokens = req.conversation.token_usage if req.conversation else 0
         if not tokens:
             tokens = count_tokens(bind_checkpoint_messages(req.contexts))
-        req.extra_user_content_parts.append(
-            TextPart(text=f"[context: {tokens} tokens]")
-        )
+
+        keep, min_archive = await self.thresholds(event)
+        threshold = keep + min_archive
+        if tokens < threshold:
+            text = f"[context: {tokens}/{threshold} tokens]"
+        else:
+            event.set_extra(ELIGIBLE_FLAG, tokens)
+            text = (
+                f"[context: {tokens}/{threshold} tokens —— 早前的记录已经够长，可以压缩了。"
+                f"如果刚才那个话题确实聊完了、没有还没办的事，就调用 {TOOL_NAME}；"
+                "还在同一个话题里就别调。]"
+            )
+        req.extra_user_content_parts.append(TextPart(text=text))
 
     @filter.on_agent_done()
-    async def drop_tool_trace(
+    async def after_agent(
         self,
         event: AstrMessageEvent,
         run_context: ContextWrapper[AstrAgentContext],
         response: LLMResponse,
     ) -> None:
-        """压缩成功的那一轮，落盘前摘掉本插件的工具调用痕迹。
+        """压缩成功就摘掉工具痕迹；够格却没被调用则记一笔。
 
-        这一轮的前缀本来就因为压缩断掉了，删这对消息不额外花钱；留着它反而会当成
-        样例，诱导模型下一轮接着调。没压缩的轮次不动，那句「不需要压缩」正好是
-        告诉模型别急着重试的信号。
+        剥离的理由：这一轮的前缀本来就因为压缩断掉了，删这对消息不额外花钱；留着
+        反而会当成样例，诱导模型下一轮接着调。没压缩的轮次不动，那句「不需要压缩」
+        正好是告诉模型别急着重试的信号。
         """
-        if not event.get_extra(COMPACTED_FLAG):
+        if event.get_extra(COMPACTED_FLAG):
+            event.set_extra(COMPACTED_FLAG, False)
+            if self.config["strip_tool_trace"]:
+                removed = strip_tool_trace(run_context.messages)
+                logger.info("SoL-Astr：已剥离 %d 条压缩工具消息。", removed)
             return
-        event.set_extra(COMPACTED_FLAG, False)
-        if not self.config["strip_tool_trace"]:
-            return
-        removed = strip_tool_trace(run_context.messages)
-        logger.info("SoL-Astr：已剥离 %d 条压缩工具消息。", removed)
+
+        eligible = event.get_extra(ELIGIBLE_FLAG)
+        if eligible and not event.get_extra(CALLED_FLAG):
+            ledger.append(
+                self.ledger_path,
+                {
+                    "umo": event.unified_msg_origin,
+                    "outcome": "not_called",
+                    "total_tokens": eligible,
+                },
+            )

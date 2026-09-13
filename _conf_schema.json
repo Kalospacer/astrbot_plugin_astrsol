@@ -1,0 +1,32 @@
+{
+  "enable_compact": {
+    "type": "bool",
+    "description": "启用 SoL-Astr",
+    "hint": "开启后向 LLM 常挂 sol_astr_compact 工具，并在每轮用户消息尾部注入一行当前上下文 token 数。",
+    "default": false
+  },
+  "dry_run": {
+    "type": "bool",
+    "description": "影子模式",
+    "hint": "只记录工具触发台账，不调用摘要模型、不改写上下文。先用它观察触发率。",
+    "default": true
+  },
+  "keep_recent_tokens": {
+    "type": "int",
+    "description": "绝对保留的最近上下文 token 数",
+    "hint": "压缩时按整轮保留最近这么多 token，绝对值，与窗口大小无关。保留段越大，压缩越不划算（压缩后首轮要按未命中价重建它）。",
+    "default": 40000
+  },
+  "min_archive_tokens": {
+    "type": "int",
+    "description": "最小归档段 token 数",
+    "hint": "切分后待摘要的旧段小于此值则不压缩。它加上「保留最近 token 数」就是实际起压门槛，默认 100k。归档段必须远大于保留段才划算。",
+    "default": 60000
+  },
+  "strip_tool_trace": {
+    "type": "bool",
+    "description": "剥离压缩轮的工具调用记录",
+    "hint": "压缩成功的那一轮，落盘前删掉 sol_astr_compact 的 tool_call/tool_result 对。",
+    "default": true
+  }
+}

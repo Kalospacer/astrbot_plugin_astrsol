@@ -93,18 +93,13 @@ class SoLAstr(Star):
             )
         return await self.context.get_using_provider_async(umo=event.unified_msg_origin)
 
-    async def thresholds(self, event: AstrMessageEvent) -> tuple[int, int]:
-        """本次会话的 (保留段, 最小归档段)。配置留 0 就按当前模型的窗口算。
+    async def thresholds(self, event: AstrMessageEvent) -> tuple[int, int, int]:
+        """本次会话的 (保留段, 最小归档段, 模型窗口)。前两项配置留 0 就按窗口算。
 
         窗口直接读核心解析好的结果：build_main_agent 在 on_llm_request 之前就把
         provider 配置 / models.dev 元数据 / fallback_max_tokens 归一到了
         provider_config["max_context_tokens"]（astr_main_agent.py:1674-1684）。
         """
-        keep = self.config["keep_recent_tokens"]
-        archive = self.config["min_archive_tokens"]
-        if keep and archive:
-            return keep, archive
-
         provider = await self.context.get_using_provider_async(
             umo=event.unified_msg_origin
         )
@@ -113,8 +108,11 @@ class SoLAstr(Star):
         )
         window = window or self._compression_config().get("fallback_max_tokens", 128000)
         return (
-            keep or min(KEEP_CAP, int(window * KEEP_RATIO)),
-            archive or min(ARCHIVE_CAP, int(window * ARCHIVE_RATIO)),
+            self.config["keep_recent_tokens"]
+            or min(KEEP_CAP, int(window * KEEP_RATIO)),
+            self.config["min_archive_tokens"]
+            or min(ARCHIVE_CAP, int(window * ARCHIVE_RATIO)),
+            window,
         )
 
     @filter.on_llm_request()
@@ -125,8 +123,11 @@ class SoLAstr(Star):
     ) -> None:
         """在当轮用户消息尾部追加一行上下文状态。
 
-        体积判断交给插件、语义判断留给模型：裸报一个 token 数模型无从判断算大算小，
-        所以这里连门槛一起给，够大了再明说可以压。
+        三个数一起给：当前用量、建议压缩线、模型真实上限。只给「当前/压缩线」会让
+        模型把压缩线当成容量上限——256k 的窗口用掉 105k 明明很宽裕，写成
+        105000/98400 却像是已经溢出了。
+
+        体积判断交给插件、语义判断留给模型：裸报一个 token 数模型无从判断算大算小。
 
         放在消息尾部而不是 system prompt，是为了不破坏上游的前缀缓存；这一行会随
         历史落盘，不要剥离，否则下一轮的前缀又和缓存对不上了。
@@ -137,14 +138,15 @@ class SoLAstr(Star):
         if not tokens:
             tokens = count_tokens(bind_checkpoint_messages(req.contexts))
 
-        keep, min_archive = await self.thresholds(event)
+        keep, min_archive, window = await self.thresholds(event)
         threshold = keep + min_archive
+        status = f"context: 当前 {tokens} / 建议压缩线 {threshold} / 模型上限 {window} tokens"
         if tokens < threshold:
-            text = f"[context: {tokens}/{threshold} tokens]"
+            text = f"[{status}]"
         else:
             event.set_extra(ELIGIBLE_FLAG, tokens)
             text = (
-                f"[context: {tokens}/{threshold} tokens —— 早前的记录已经够长，可以压缩了。"
+                f"[{status} —— 已过压缩线。这条线是省成本的建议值，不是容量上限。"
                 f"如果刚才那个话题确实聊完了、没有还没办的事，就调用 {TOOL_NAME}；"
                 "还在同一个话题里就别调。]"
             )

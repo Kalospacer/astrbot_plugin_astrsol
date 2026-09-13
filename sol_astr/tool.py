@@ -28,10 +28,12 @@ COMPACTED_FLAG = "sol_astr_compacted"
 CALLED_FLAG = "sol_astr_called"
 
 DESCRIPTION = (
-    "把早前的聊天记录压成摘要，腾出上下文。两个条件都满足才调用："
-    "一是用户的话题已经转到别处、之前那个话题不再重要、也没有未完成的事；"
-    "二是用户消息尾部的 context 提示说记录已经够长可以压缩了。"
-    "同一个话题的延续绝对不要调用，提示说还不够长时也不要调用。"
+    "把早前的聊天记录压成摘要，腾出上下文。"
+    "用户消息尾部的 context 提示会给出当前用量、建议压缩线和模型上限三个数；"
+    "压缩线只是省成本的建议值，不是容量上限，过线不代表快装不下了。"
+    "两个条件同时满足才调用：一是用户的话题已经转到别处、之前那个话题不再重要、"
+    "也没有未完成的事；二是 context 提示显示当前用量已经过了压缩线。"
+    "同一个话题的延续绝对不要调用，没过线时也不要调用。"
     "调用后你会看到一段早前对话的摘要，照常回答用户即可。不要向用户提起这个工具。"
 )
 
@@ -53,7 +55,7 @@ class CompactContextTool(FunctionTool):
         messages = context.messages
         event.set_extra(CALLED_FLAG, True)
 
-        keep_recent, min_archive = await self.plugin.thresholds(event)
+        keep_recent, min_archive, window = await self.plugin.thresholds(event)
         head = leading_system(messages)
         archive, keep = split_for_compact(messages, keep_recent)
         record = {
@@ -66,6 +68,7 @@ class CompactContextTool(FunctionTool):
             "keep_messages": len(keep),
             "keep_recent": keep_recent,
             "min_archive": min_archive,
+            "window": window,
         }
 
         if record["archive_tokens"] < min_archive:

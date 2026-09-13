@@ -89,8 +89,8 @@ async def _alerts(plugin, limits: dict) -> list[dict]:
             {
                 "level": "warn",
                 "title": "拿不到 OpenRouter 价目",
-                "body": f"{plugin.catalog.error}。压缩线退回按窗口比例估算，"
-                "算不出这套组合划不划算。",
+                "body": f"{plugin.catalog.error}。压缩线按窗口画，不受影响；"
+                "只是算不出这套组合划不划算。",
                 "fix": "检查容器能否访问 openrouter.ai。",
             }
         )
@@ -131,6 +131,7 @@ async def status(plugin) -> dict:
             "keep_source": limits["keep_source"],
             "archive_source": limits["archive_source"],
             "window_source": limits["window_source"],
+            "ratio": plugin.config.get("threshold_ratio", 0.72),
         },
         "sweet_spot": _spot_view(spot),
         "config": {k: plugin.config[k] for k in plugin.config.keys()},

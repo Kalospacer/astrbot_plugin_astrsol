@@ -23,10 +23,13 @@ from .sol_astr.tool import CALLED_FLAG, COMPACTED_FLAG, CompactContextTool
 PLUGIN_NAME = "astrbot_plugin_astrsol"
 ELIGIBLE_FLAG = "sol_astr_eligible"
 
-# 没有价目时的回落阈值：按窗口取比例，再用绝对值封顶。比例保证小窗口模型也够得着
-# （否则绝对阈值就是死值），封顶保证大窗口不会留着 150k 不压——那时压缩等于没压。
+# 保留段按窗口取比例、绝对值封顶：比例保证小窗口模型也够得着（否则绝对阈值是死值），
+# 封顶保证大窗口不会留 150k 原文不压。压缩线按窗口比例画（threshold_ratio），
+# 价格只负责验收这条线划不划算，不决定线的位置。
 KEEP_RATIO, KEEP_CAP = 0.15, 40000
-ARCHIVE_RATIO, ARCHIVE_CAP = 0.25, 60000
+DEFAULT_THRESHOLD_RATIO = 0.72
+# 归档段最多吃到摘要模型窗口的 80%，剩下的给摘要指令和 memo 输出。
+SUMM_WINDOW_RATIO = 0.8
 
 
 class SoLAstr(Star):
@@ -149,33 +152,39 @@ class SoLAstr(Star):
             "keep_source": "配置" if self.config["keep_recent_tokens"] else "按窗口",
         }
 
+        main_entry, summ_entry = await self.priced_pair(umo)
+
         if self.config["min_archive_tokens"]:
             result["min_archive"] = self.config["min_archive_tokens"]
             result["archive_source"] = "配置"
-            return result
+        else:
+            line = int(
+                window * self.config.get("threshold_ratio", DEFAULT_THRESHOLD_RATIO)
+            )
+            source = "按窗口"
+            if summ_entry and summ_entry.get("context"):
+                cap = int(summ_entry["context"] * SUMM_WINDOW_RATIO)
+                if cap < line - keep:
+                    line = keep + cap
+                    source = "摘要模型窗口"
+            result["min_archive"] = max(line - keep, 0)
+            result["archive_source"] = source
 
-        spot = await self.compute_sweet_spot(umo, keep)
-        if spot is not None:
-            result["sweet_spot"] = spot
-            if spot.solvable:
-                result["min_archive"] = spot.min_archive
-                result["archive_source"] = "价目"
-                return result
-
-        result["min_archive"] = min(ARCHIVE_CAP, int(window * ARCHIVE_RATIO))
-        result["archive_source"] = "按窗口"
+        if main_entry and summ_entry:
+            target = self.config["target_turns"]
+            key = (
+                main_entry["id"],
+                summ_entry["id"],
+                keep,
+                result["min_archive"],
+                target,
+            )
+            if key not in self._spot_cache:
+                self._spot_cache[key] = sweet_spot(
+                    main_entry, summ_entry, keep, result["min_archive"], target
+                )
+            result["sweet_spot"] = self._spot_cache[key]
         return result
-
-    async def compute_sweet_spot(self, umo: str | None, keep: int):
-        """按真实价目算甜点值。目录不可用或模型认不出时返回 None。"""
-        main, summarizer = await self.priced_pair(umo)
-        if not main or not summarizer:
-            return None
-        target = self.config["target_turns"]
-        key = (main["id"], summarizer["id"], keep, target)
-        if key not in self._spot_cache:
-            self._spot_cache[key] = sweet_spot(main, summarizer, keep, target)
-        return self._spot_cache[key]
 
     # ---------- 钩子 ----------
 

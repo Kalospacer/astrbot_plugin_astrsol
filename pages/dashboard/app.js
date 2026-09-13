@@ -52,7 +52,7 @@ function renderStatus(status, ledger) {
 
   const rate = ledger.eligible ? `${(ledger.call_rate * 100).toFixed(0)}%` : "—";
   const cells = [
-    ["压缩线", fmtK(t.threshold), "tokens", `保留 ${fmtK(t.keep_recent)} + 归档 ${fmtK(t.min_archive)}`],
+    ["压缩线", fmtK(t.threshold), "tokens", `窗口的 ${((t.threshold / t.window) * 100).toFixed(0)}% · 保留 ${fmtK(t.keep_recent)}`],
     ["窗口", fmtK(t.window), "tokens", `来源 ${esc(t.window_source)}`],
     ["触发率", rate, "", ledger.eligible ? `${ledger.counts.not_called} 次够格没调` : "还没数据"],
     [
@@ -227,11 +227,11 @@ function renderModels(models, status) {
   const spot = status.sweet_spot;
   let verdict = `<div class="verdict">价目齐全，还没算出结论。</div>`;
   if (spot && !spot.solvable) {
-    verdict = `<div class="verdict" data-bad="1">这套组合永远不回本。${esc(spot.reason)}</div>`;
+    verdict = `<div class="verdict" data-bad="1">${esc(spot.reason)}</div>`;
   } else if (spot) {
-    verdict = `<div class="verdict">压一次 <span class="num">${money(spot.one_time_cost)}</span>，要求
-      <b>${spot.breakeven_turns}</b> 次请求内回本，归档段至少 <span class="num">${fmt(spot.min_archive)}</span>。
-      压缩线 <span class="num">${fmt(status.thresholds.threshold)}</span> 就是这么来的。</div>`;
+    verdict = `<div class="verdict">在这条线上压一次 <span class="num">${money(spot.one_time_cost)}</span>，
+      之后每轮省 <span class="num">${money(spot.per_round_saving)}</span>，
+      <b>${spot.breakeven_turns.toFixed(1)}</b> 次请求回本（目标 ≤ ${spot.detail.target_turns} 次）。</div>`;
   }
 
   $("models").innerHTML =
@@ -241,17 +241,16 @@ function renderModels(models, status) {
 
 /* ---------------- 模拟 ---------------- */
 
-function computeSpot(main, summ, keep, turns, memo) {
+function computeEval(main, summ, keep, archive, memo) {
   const pi = main.price.input / 1e6;
   const pc = main.price.cache_read_effective / 1e6;
   const pw = main.price.cache_write / 1e6;
   const si = summ.price.input / 1e6;
   const so = summ.price.output / 1e6;
-  const once = (keep + memo) * (pi - pc + pw) + memo * so;
-  const den = turns * pc - si;
-  if (den <= 0) return { solvable: false, once };
-  const archive = Math.round(once / den);
-  return { solvable: true, once, archive, threshold: keep + archive };
+  const once = (keep + memo) * (pi - pc + pw) + archive * si + memo * so;
+  const saving = archive * pc;
+  const be = saving > 0 ? once / saving : Infinity;
+  return { once, saving, be };
 }
 
 function renderSim(models) {
@@ -264,12 +263,12 @@ function renderSim(models) {
     <div class="sim">
       <div>
         <div class="slider-row">
-          <div class="head"><span class="k">目标回本轮数</span><span class="v" id="sim-n-v"></span></div>
-          <input type="range" id="sim-n" min="1" max="20" step="1" />
+          <div class="head"><span class="k">压缩线比例</span><span class="v" id="sim-r-v"></span></div>
+          <input type="range" id="sim-r" min="0.3" max="0.8" step="0.01" />
         </div>
         <div class="slider-row">
-          <div class="head"><span class="k">保留段</span><span class="v" id="sim-k-v"></span></div>
-          <input type="range" id="sim-k" min="4000" max="80000" step="2000" />
+          <div class="head"><span class="k">目标回本轮数</span><span class="v" id="sim-n-v"></span></div>
+          <input type="range" id="sim-n" min="1" max="20" step="1" />
         </div>
         <button class="btn primary" id="sim-apply">应用到配置</button>
       </div>
@@ -279,43 +278,45 @@ function renderSim(models) {
       </div>
     </div>`;
 
+  const rEl = $("sim-r");
   const nEl = $("sim-n");
-  const kEl = $("sim-k");
+  rEl.value = state.status.thresholds.ratio ?? 0.72;
   nEl.value = state.status.config.target_turns;
-  kEl.value = state.status.thresholds.keep_recent;
 
   const win = state.status.thresholds.window;
+  const keep = state.status.thresholds.keep_recent;
   const builtin = state.sessions.builtin_fallback || win;
 
   const update = () => {
+    const ratio = +rEl.value;
     const n = +nEl.value;
-    const k = +kEl.value;
+    const line = Math.round(win * ratio);
+    const archive = Math.max(line - keep, 0);
+    $("sim-r-v").textContent = `${(ratio * 100).toFixed(0)}%`;
     $("sim-n-v").textContent = n;
-    $("sim-k-v").textContent = fmt(k);
-    const r = computeSpot(models.main, models.summarizer, k, n, memo);
+    const r = computeEval(models.main, models.summarizer, keep, archive, memo);
+    const ok = r.be <= n;
 
     const W = 1000;
     const x = (v) => logScale(win)(v) * W;
     $("sim-ruler").innerHTML = `<svg viewBox="0 0 ${W} 30" style="height:30px">
       <rect x="0" y="12" width="${W}" height="6" fill="var(--ink)" opacity="0.06"/>
-      ${r.solvable ? `<rect x="${x(k)}" y="12" width="${Math.max(0, x(r.threshold) - x(k))}" height="6" fill="var(--accent)" opacity="0.5"/>` : ""}
-      <line x1="${x(k)}" y1="6" x2="${x(k)}" y2="24" stroke="var(--ink-3)" stroke-width="1.5"/>
-      ${r.solvable ? `<line x1="${x(r.threshold)}" y1="6" x2="${x(r.threshold)}" y2="24" stroke="var(--accent)" stroke-width="1.5"/>` : ""}
+      <rect x="${x(keep)}" y="12" width="${Math.max(0, x(line) - x(keep))}" height="6" fill="var(--accent)" opacity="0.5"/>
+      <line x1="${x(keep)}" y1="6" x2="${x(keep)}" y2="24" stroke="var(--ink-3)" stroke-width="1.5"/>
+      <line x1="${x(line)}" y1="6" x2="${x(line)}" y2="24" stroke="var(--accent)" stroke-width="1.5"/>
       <line x1="${x(builtin)}" y1="6" x2="${x(builtin)}" y2="24" stroke="var(--warn)" stroke-width="1.5"/>
     </svg>`;
 
-    $("sim-out").innerHTML = r.solvable
-      ? `
-      <div class="row"><span class="k">压缩线</span><span class="v">${fmt(r.threshold)}</span></div>
-      <div class="row"><span class="k">最小归档段</span><span class="v">${fmt(r.archive)}</span></div>
+    $("sim-out").innerHTML = `
+      <div class="row"><span class="k">压缩线</span><span class="v">${fmt(line)}</span></div>
+      <div class="row"><span class="k">归档段</span><span class="v">${fmt(archive)}</span></div>
       <div class="row"><span class="k">压一次成本</span><span class="v">${money(r.once)}</span></div>
-      <div class="row" style="border:none"><span class="k">占窗口</span>
-        <span class="v">${((r.threshold / win) * 100).toFixed(0)}%</span></div>`
-      : `<div class="verdict" data-bad="1">这个轮数下无解：摘要读一遍比省下的还贵。把轮数调大，或者换个便宜的压缩模型。</div>`;
+      <div class="row" style="border:none"><span class="k">回本轮数</span>
+        <span class="v" style="color:${ok ? "var(--ok)" : "var(--danger)"}">${Number.isFinite(r.be) ? r.be.toFixed(1) : "—"}${ok ? "" : "，超目标"}</span></div>`;
   };
 
+  rEl.addEventListener("input", update);
   nEl.addEventListener("input", update);
-  kEl.addEventListener("input", update);
   update();
 
   $("sim-apply").addEventListener("click", async () => {
@@ -323,8 +324,8 @@ function renderSim(models) {
     btn.disabled = true;
     btn.textContent = "保存中…";
     await bridge.apiPost("config", {
+      threshold_ratio: +rEl.value,
       target_turns: +nEl.value,
-      keep_recent_tokens: +kEl.value,
     });
     btn.textContent = "已应用";
     setTimeout(() => {
@@ -396,8 +397,9 @@ const FIELDS = [
   ["enable_compact", "bool", "启用 SoL-Astr", "关掉后模型看不到压缩工具，插件不介入。"],
   ["dry_run", "bool", "影子模式", "只记账，不调摘要、不改历史。先看触发率再关。"],
   ["keep_recent_tokens", "int", "保留段 tokens", "0 = 自动：窗口的 15%，上限 40000。"],
-  ["min_archive_tokens", "int", "最小归档段 tokens", "0 = 自动：按价目反推；价目拿不到退回窗口的 25%。"],
-  ["target_turns", "int", "目标回本轮数", "压缩的一次性开销要求几次请求内赚回来。越大压得越早。"],
+  ["min_archive_tokens", "int", "最小归档段 tokens", "0 = 自动：压缩线（窗口×比例）减去保留段。手填后压缩线 = 保留段 + 这个数。"],
+  ["threshold_ratio", "float", "压缩线比例", "压缩线 = 窗口 × 这个比例，默认 0.72。给内置 82% 兜底留反应区。"],
+  ["target_turns", "int", "目标回本轮数", "在压缩线上压一次，回本轮数不超过它才算划算，超了告警。越大越宽松。"],
   ["strip_tool_trace", "bool", "剥离工具痕迹", "压缩成功那轮，落盘前删掉工具调用记录，免得模型照着复读。"],
 ];
 
@@ -412,7 +414,7 @@ function renderConfig(status) {
         ${
           type === "bool"
             ? `<label class="switch"><input type="checkbox" data-key="${key}" ${c[key] ? "checked" : ""}/><span class="track"></span></label>`
-            : `<input type="number" data-key="${key}" value="${c[key]}" />`
+            : `<input type="number" data-key="${key}" data-type="${type}" step="${type === "float" ? "0.01" : "1"}" value="${c[key]}" />`
         }
       </div>`,
     ).join("") +
@@ -438,7 +440,8 @@ function renderConfig(status) {
     $("config")
       .querySelectorAll("[data-key]")
       .forEach((el) => {
-        body[el.dataset.key] = el.type === "checkbox" ? el.checked : +el.value;
+        body[el.dataset.key] =
+          el.type === "checkbox" ? el.checked : el.dataset.type === "float" ? parseFloat(el.value) : +el.value;
       });
     btn.disabled = true;
     btn.textContent = "保存中…";

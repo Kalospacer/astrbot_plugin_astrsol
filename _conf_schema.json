@@ -19,14 +19,20 @@
   },
   "min_archive_tokens": {
     "type": "int",
-    "description": "归档段至少多少 token 才压（0 = 按价目自动算）",
-    "hint": "0 表示自动：按 OpenRouter 价目反推回本点；价目拿不到时退回窗口的 25%，最多 60000。它加上保留段就是起压门槛，会写在每轮的 context 提示里告诉模型。",
+    "description": "归档段至少多少 token 才压（0 = 按压缩线自动算）",
+    "hint": "0 表示自动：压缩线（窗口 × 比例）减去保留段；摘要模型窗口装不下时线会提前。手填后压缩线 = 保留段 + 这个数。",
     "default": 0
+  },
+  "threshold_ratio": {
+    "type": "float",
+    "description": "压缩线占模型窗口的比例",
+    "hint": "压缩线 = 窗口 × 这个比例，默认 0.72。1M 窗口就把线画在 720k，和内置 82% 兜底之间留出模型的反应区。价目不决定线的位置，只验证这条线划不划算。仅在 min_archive_tokens 为 0 时生效。",
+    "default": 0.72
   },
   "target_turns": {
     "type": "int",
     "description": "目标回本轮数",
-    "hint": "压缩这笔一次性开销要求在几次 LLM 请求内赚回来。数值越大验收越宽松、压缩线越低、压得越早。仅在按价目自动算归档段时生效。",
+    "hint": "在压缩线上压一次，回本轮数不超过它才算划算，超了面板告警。越大越宽松。",
     "default": 5
   },
   "strip_tool_trace": {

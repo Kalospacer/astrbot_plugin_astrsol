@@ -19,8 +19,8 @@
   },
   "min_archive_tokens": {
     "type": "int",
-    "description": "归档段至少多少 token 才压（0 = 按模型窗口自动算）",
-    "hint": "0 表示自动：取窗口的 25%，最多 60000。它加上保留段就是起压门槛，会写在每轮的 context 提示里告诉模型。归档段必须远大于保留段才划算。",
+    "description": "归档段至少多少 token 才压（0 = 按价目自动算）",
+    "hint": "0 表示自动：按 OpenRouter 价目反推回本点；价目拿不到时退回窗口的 25%，最多 60000。它加上保留段就是起压门槛，会写在每轮的 context 提示里告诉模型。",
     "default": 0
   },
   "target_turns": {

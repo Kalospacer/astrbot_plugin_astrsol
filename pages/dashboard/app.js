@@ -3,207 +3,217 @@
 const bridge = window.AstrBotPluginPage;
 const $ = (id) => document.getElementById(id);
 
-const MODE_TEXT = { off: "未启用", dry_run: "影子模式", live: "压缩生效中" };
+const MODE_TEXT = { off: "未启用", dry_run: "影子模式", live: "生效中" };
 const OUTCOME_TEXT = {
-  not_called: "够格未调用",
+  not_called: "够格没调",
   too_small: "归档段太小",
   dry_run: "影子记录",
   empty_summary: "摘要为空",
   compacted: "已压缩",
 };
 const OUTCOME_COLOR = {
-  not_called: "var(--text-3)",
-  too_small: "#9ca3af",
+  not_called: "var(--ink-3)",
+  too_small: "#a1a1aa",
   dry_run: "var(--warn)",
   empty_summary: "var(--danger)",
   compacted: "var(--accent)",
 };
 
+const esc = (s) =>
+  String(s ?? "").replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+  );
 const fmt = (n) => (n ?? 0).toLocaleString("en-US");
 const fmtK = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n));
 const money = (n) => `$${n < 0.01 ? n.toFixed(5) : n.toFixed(3)}`;
 
 let state = {};
 
-/* ---------------- 渲染：关键数字与告警 ---------------- */
+/* ---------------- 状态读出 ---------------- */
 
-function renderHero(status, ledger) {
+function renderStatus(status, ledger) {
   const t = status.thresholds;
-  $("mode-badge").dataset.mode = status.mode;
-  $("mode-badge").lastElementChild.textContent = MODE_TEXT[status.mode] || status.mode;
+  const tag = $("mode-tag");
+  tag.dataset.mode = status.mode;
+  tag.textContent = MODE_TEXT[status.mode] || status.mode;
 
-  $("hero-sub").textContent =
+  $("readout").textContent =
     status.mode === "off"
-      ? "插件当前未启用。在下方配置里打开总开关后，模型才会看到压缩工具。"
+      ? "插件没开。到下面配置里打开总开关，模型才看得见压缩工具。"
       : status.mode === "dry_run"
-        ? "影子模式：全流程照跑，但不调用摘要模型、不改写任何历史，只记台账。"
-        : `压缩已生效。上下文超过 ${fmt(t.threshold)} tokens 后，模型可在话题边界自行压缩。`;
+        ? "影子模式：流程照跑，不动历史，只记账。"
+        : `生效中。上下文过 ${fmt(t.threshold)} 就建议模型压缩。`;
 
   const rate = ledger.eligible ? `${(ledger.call_rate * 100).toFixed(0)}%` : "—";
-  $("kpis").innerHTML = [
+  const cells = [
     ["压缩线", fmtK(t.threshold), "tokens", `保留 ${fmtK(t.keep_recent)} + 归档 ${fmtK(t.min_archive)}`],
-    ["模型上限", fmtK(t.window), "tokens", `来源：${t.window_source}`],
-    ["触发率", rate, "", `${ledger.counts.not_called} 次够格未调用`],
-    ["已压缩", String(ledger.counts.compacted), "次", ledger.duration_ms_avg ? `平均耗时 ${(ledger.duration_ms_avg / 1000).toFixed(1)}s` : "尚未发生"],
-  ]
+    ["窗口", fmtK(t.window), "tokens", `来源 ${esc(t.window_source)}`],
+    ["触发率", rate, "", ledger.eligible ? `${ledger.counts.not_called} 次够格没调` : "还没数据"],
+    [
+      "已压缩",
+      String(ledger.counts.compacted),
+      "次",
+      ledger.duration_ms_avg ? `平均 ${(ledger.duration_ms_avg / 1000).toFixed(1)}s` : "没发生过",
+    ],
+  ];
+  $("stats").innerHTML = cells
     .map(
-      ([label, value, unit, sub]) => `
-      <div class="kpi">
-        <div class="label">${label}</div>
-        <div class="value num">${value}${unit ? `<span class="unit">${unit}</span>` : ""}</div>
-        <div class="sub">${sub}</div>
+      ([k, v, u, s]) => `<div>
+        <dt>${k}</dt>
+        <dd class="v">${v}${u ? `<span class="u">${u}</span>` : ""}</dd>
+        <dd class="s">${s}</dd>
       </div>`,
     )
     .join("");
 
-  const icon = `<svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
-    <circle cx="10" cy="10" r="8"/><path d="M10 6v5M10 13.6v.4" stroke-linecap="round"/></svg>`;
   $("alerts").innerHTML = (status.alerts || [])
     .map(
-      (a) => `<div class="alert" data-level="${a.level}">${icon}
-        <div><h4>${a.title}</h4><p>${a.body}</p><div class="fix">${a.fix}</div></div>
+      (a) => `<div class="alert" data-level="${esc(a.level)}">
+        <span class="lv">${a.level === "error" ? "错误" : "告警"}</span><h4>${esc(a.title)}</h4>
+        <p>${esc(a.body)}</p>
+        <div class="fix">${esc(a.fix)}</div>
       </div>`,
     )
     .join("");
 }
 
-/* ---------------- 渲染：上下文标尺 ---------------- */
+/* ---------------- 标尺 ---------------- */
 
-function renderRuler(sessions) {
+function renderRuler(sessions, source) {
   const { window: win, threshold, keep_recent, builtin_fallback, sessions: rows } = sessions;
   const W = 1000;
-  const H = 108;
-  const y = 62;
+  const H = 116;
+  const y = 58;
   const x = (v) => Math.max(0, Math.min(1, v / win)) * W;
 
-  const marks = [
-    { v: keep_recent, label: `保留段 ${fmtK(keep_recent)}`, color: "var(--text-3)" },
-    { v: threshold, label: `压缩线 ${fmtK(threshold)}`, color: "var(--accent)" },
-    { v: builtin_fallback, label: `内置兜底 ${fmtK(builtin_fallback)}`, color: "var(--warn)" },
-  ];
+  $("ruler-note").textContent = `窗口 ${fmtK(win)}，来源 ${source}`;
 
-  const bands = `
-    <rect x="0" y="${y - 7}" width="${x(keep_recent)}" height="14" rx="7" fill="var(--surface-2)"/>
-    <rect x="${x(keep_recent)}" y="${y - 7}" width="${x(threshold) - x(keep_recent)}" height="14" fill="var(--surface-2)"/>
-    <rect x="${x(threshold)}" y="${y - 7}" width="${x(builtin_fallback) - x(threshold)}" height="14" fill="var(--accent-soft)"/>
-    <rect x="${x(builtin_fallback)}" y="${y - 7}" width="${W - x(builtin_fallback)}" height="14" rx="7" fill="var(--warn-bg)"/>`;
+  const zones = `
+    <rect x="0" y="${y - 8}" width="${x(keep_recent)}" height="16" fill="var(--ink)" opacity="0.08"/>
+    <rect x="${x(keep_recent)}" y="${y - 8}" width="${x(threshold) - x(keep_recent)}" height="16" fill="var(--ink)" opacity="0.03"/>
+    <rect x="${x(threshold)}" y="${y - 8}" width="${Math.max(0, x(builtin_fallback) - x(threshold))}" height="16" fill="var(--accent-soft)"/>
+    <rect x="${x(builtin_fallback)}" y="${y - 8}" width="${W - x(builtin_fallback)}" height="16" fill="url(#hatch)"/>
+    <rect x="${x(builtin_fallback)}" y="${y - 8}" width="${W - x(builtin_fallback)}" height="16" fill="var(--warn-bg)"/>
+    <line x1="0" y1="${y + 8}" x2="${W}" y2="${y + 8}" stroke="var(--line)" stroke-width="1"/>`;
 
-  const ticks = marks
+  const tick = (v, label, color, above) => `
+    <line x1="${x(v)}" y1="${above ? y - 20 : y + 8}" x2="${x(v)}" y2="${above ? y - 8 : y + 20}" stroke="${color}" stroke-width="1.5"/>
+    <text x="${x(v)}" y="${above ? y - 28 : y + 34}" fill="${color}" font-size="11.5"
+      font-family="var(--mono)" text-anchor="middle">${label}</text>`;
+
+  const ticks =
+    tick(threshold, `压缩线 ${fmtK(threshold)}`, "var(--accent)", true) +
+    tick(keep_recent, `保留 ${fmtK(keep_recent)}`, "var(--ink-3)", false) +
+    tick(builtin_fallback, `兜底 ${fmtK(builtin_fallback)}`, "var(--warn)", false);
+
+  const cursors = rows
+    .slice(0, 16)
     .map(
-      (m) => `<g>
-        <line x1="${x(m.v)}" y1="${y - 18}" x2="${x(m.v)}" y2="${y + 18}" stroke="${m.color}" stroke-width="1.5"/>
-        <text x="${x(m.v)}" y="${y - 26}" fill="${m.color}" font-size="12.5" text-anchor="middle">${m.label}</text>
+      (s) => `<g>
+        <line x1="${x(s.tokens)}" y1="${y - 14}" x2="${x(s.tokens)}" y2="${y + 14}" stroke="var(--accent)" stroke-width="1" opacity="0.5"/>
+        <circle cx="${x(s.tokens)}" cy="${y}" r="4.5" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <title>${esc(s.title)} · ${fmt(s.tokens)} tokens</title>
       </g>`,
     )
     .join("");
 
-  const cursors = rows
-    .slice(0, 16)
-    .map((s) => {
-      const cx = x(s.tokens);
-      return `<g>
-        <circle cx="${cx}" cy="${y}" r="6.5" fill="var(--surface)" stroke="var(--accent)" stroke-width="2.5"/>
-        <title>${s.title} · ${fmt(s.tokens)} tokens</title>
-      </g>`;
-    })
-    .join("");
-
-  $("ruler").innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="height:${H}px">
-    ${bands}${ticks}${cursors}
-    <text x="0" y="${y + 34}" fill="var(--text-3)" font-size="12">0</text>
-    <text x="${W}" y="${y + 34}" fill="var(--text-3)" font-size="12" text-anchor="end">${fmtK(win)}</text>
+  $("ruler").innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="height:${H}px">
+    <defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="6" stroke="var(--warn)" stroke-width="1" opacity="0.4"/>
+    </pattern></defs>
+    ${zones}${ticks}${cursors}
+    <text x="0" y="${y + 52}" fill="var(--ink-3)" font-size="10.5" font-family="var(--mono)">0</text>
+    <text x="${W}" y="${y + 52}" fill="var(--ink-3)" font-size="10.5" font-family="var(--mono)" text-anchor="end">${fmtK(win)}</text>
   </svg>`;
 
   const over = rows.filter((s) => s.tokens >= threshold).length;
   $("ruler-legend").innerHTML = [
-    ["var(--surface-2)", "保留段", "压缩后原样留下的最近对话"],
-    ["var(--accent-soft)", "可压缩区", `${over} 个会话已进入`],
-    ["var(--warn-bg)", "内置兜底区", "到这里核心会自己动手压"],
+    ["rgba(128,128,128,0.15)", "保留段", "压缩后原样留下的最近对话"],
+    ["var(--accent-soft)", "可压缩区", `${over} 个会话已进`],
+    ["var(--warn-bg)", "内置兜底区", "到这里核心自己动手"],
   ]
     .map(
       ([c, k, v]) =>
-        `<div class="legend-item"><span class="swatch" style="background:${c}"></span><b>${k}</b> · ${v}</div>`,
+        `<div class="legend-item"><span class="swatch" style="background:${c}"></span><b>${k}</b> ${v}</div>`,
     )
     .join("");
+}
 
-  $("sessions-card").innerHTML = rows.length
-    ? `<table><thead><tr><th>会话</th><th class="right">当前用量</th><th class="right">距压缩线</th></tr></thead>
+/* ---------------- 会话 ---------------- */
+
+function renderSessions(sessions) {
+  const { threshold, sessions: rows } = sessions;
+  $("sessions").innerHTML = rows.length
+    ? `<table><thead><tr><th>会话</th><th class="right">用量</th><th class="right">距压缩线</th></tr></thead>
        <tbody>${rows
          .slice(0, 12)
          .map((s) => {
            const gap = threshold - s.tokens;
-           return `<tr><td>${s.title}</td>
+           return `<tr><td>${esc(s.title)}</td>
              <td class="right num">${fmt(s.tokens)}</td>
-             <td class="right num" style="color:${gap <= 0 ? "var(--accent)" : "var(--text-3)"}">
+             <td class="right num" style="color:${gap <= 0 ? "var(--accent)" : "var(--ink-3)"}">
                ${gap <= 0 ? "已过线" : `还差 ${fmt(gap)}`}</td></tr>`;
          })
          .join("")}</tbody></table>`
-    : `<div class="empty">还没有产生 token 用量的会话。聊几轮之后这里会出现数据。</div>`;
+    : `<div class="empty">还没有会话用量，聊几轮再来。</div>`;
 }
 
-/* ---------------- 渲染：模型与价目 ---------------- */
+/* ---------------- 价目 ---------------- */
 
-function priceGrid(m) {
+function priceRows(m) {
   if (!m.resolved) {
-    return `<div class="alias">目录里没认出这个名字，价目不可用。</div>`;
+    return `<div class="alias" style="margin-top:14px">目录里没认出这个名字，价目不可用。</div>`;
   }
   const p = m.price;
-  return `<div class="price-grid">
+  return `<div class="prices">
     ${[
       ["输入", money(p.input)],
       ["输出", money(p.output)],
       [p.has_cache_discount ? "缓存读" : "缓存读（无折扣）", money(p.cache_read_effective)],
       ["缓存写", p.cache_write ? money(p.cache_write) : "不收费"],
     ]
-      .map(([k, v]) => `<div class="price-cell"><div class="k">${k}</div><div class="v num">${v}</div></div>`)
+      .map(([k, v]) => `<div class="row"><span class="k">${k}</span><span class="v">${v}</span></div>`)
       .join("")}
   </div>`;
 }
 
-function modelCard(m) {
-  return `<div class="model-card">
-    <div class="role">${m.role}</div>
-    <div class="mid">${m.resolved ? m.id : m.configured_name || "未配置"}</div>
+function modelBlock(m) {
+  return `<div class="model">
+    <div class="role">${esc(m.role)}</div>
+    <div class="mid">${esc(m.resolved ? m.id : m.configured_name || "未配置")}</div>
     <div class="alias">${
       m.resolved
-        ? `配置名 ${m.configured_name} · 命中 ${m.hits.join(" / ") || "—"}${
-            m.muted.length ? ` · 忽略 ${m.muted.join(" / ")}` : ""
+        ? `配置 ${esc(m.configured_name)} · 命中 ${esc(m.hits.join(" / ") || "—")}${
+            m.muted.length ? ` · 忽略 ${esc(m.muted.join(" / "))}` : ""
           }`
         : ""
     }</div>
-    ${priceGrid(m)}
+    ${priceRows(m)}
   </div>`;
 }
 
 function renderModels(models, status) {
   if (models.catalog_error && !models.catalog_size) {
-    $("models-card").innerHTML =
-      `<div class="empty">拿不到 OpenRouter 价目：${models.catalog_error}</div>`;
+    $("models").innerHTML = `<div class="empty">拿不到 OpenRouter 价目：${esc(models.catalog_error)}</div>`;
     return;
   }
   const spot = status.sweet_spot;
-  const arrow = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-    <path d="M5 12h14M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-
-  let verdict = `<div class="verdict">价目齐全，但还没算出结论。</div>`;
+  let verdict = `<div class="verdict">价目齐全，还没算出结论。</div>`;
   if (spot && !spot.solvable) {
-    verdict = `<div class="verdict" data-bad="1"><b>这套组合永远不回本。</b><br/>${spot.reason}</div>`;
+    verdict = `<div class="verdict" data-bad="1">这套组合永远不回本。${esc(spot.reason)}</div>`;
   } else if (spot) {
-    verdict = `<div class="verdict">
-      按现在的价目，压一次的一次性成本是 <b class="num">${money(spot.one_time_cost)}</b>，
-      要求 <b>${spot.breakeven_turns}</b> 次请求内回本，反推出归档段至少
-      <b class="num">${fmt(spot.min_archive)}</b> tokens —— 这就是压缩线
-      <b class="num">${fmt(status.thresholds.threshold)}</b> 的由来。</div>`;
+    verdict = `<div class="verdict">压一次 <span class="num">${money(spot.one_time_cost)}</span>，要求
+      <b>${spot.breakeven_turns}</b> 次请求内回本，归档段至少 <span class="num">${fmt(spot.min_archive)}</span>。
+      压缩线 <span class="num">${fmt(status.thresholds.threshold)}</span> 就是这么来的。</div>`;
   }
 
-  $("models-card").innerHTML =
-    `<div class="models">${modelCard(models.main)}<div class="arrow">${arrow}</div>${modelCard(models.summarizer)}</div>${verdict}
-     <div class="alias" style="margin-top:14px;color:var(--text-3);font-size:12.5px">
-       目录共 ${models.catalog_size} 个模型。价目为官方牌价（$/1M tokens），
-       走聚合渠道时实付可能不同，此处仅用于比较划算程度。</div>`;
+  $("models").innerHTML =
+    `<div class="models">${modelBlock(models.main)}<div class="arrow">-&gt;</div>${modelBlock(models.summarizer)}</div>${verdict}
+     <div class="footnote">目录共 ${models.catalog_size} 个模型，单位 $/1M tokens。走聚合渠道实付可能不同，这里只比谁划算。</div>`;
 }
 
-/* ---------------- 渲染：模拟器 ---------------- */
+/* ---------------- 模拟 ---------------- */
 
 function computeSpot(main, summ, keep, turns, memo) {
   const pi = main.price.input / 1e6;
@@ -220,24 +230,27 @@ function computeSpot(main, summ, keep, turns, memo) {
 
 function renderSim(models) {
   if (!models.main.resolved || !models.summarizer.resolved) {
-    $("sim-card").innerHTML = `<div class="empty">两个模型都解析到价目后才能模拟。</div>`;
+    $("sim").innerHTML = `<div class="empty">两个模型都解析到价目后才能模拟。</div>`;
     return;
   }
   const memo = models.memo_tokens;
-  $("sim-card").innerHTML = `
+  $("sim").innerHTML = `
     <div class="sim">
       <div>
         <div class="slider-row">
-          <div class="head"><span class="k">目标回本轮数</span><span class="v num" id="sim-n-v"></span></div>
+          <div class="head"><span class="k">目标回本轮数</span><span class="v" id="sim-n-v"></span></div>
           <input type="range" id="sim-n" min="1" max="20" step="1" />
         </div>
         <div class="slider-row">
-          <div class="head"><span class="k">保留段</span><span class="v num" id="sim-k-v"></span></div>
+          <div class="head"><span class="k">保留段</span><span class="v" id="sim-k-v"></span></div>
           <input type="range" id="sim-k" min="4000" max="80000" step="2000" />
         </div>
-        <button class="primary-btn" id="sim-apply">应用到配置</button>
+        <button class="btn primary" id="sim-apply">应用到配置</button>
       </div>
-      <div class="sim-out" id="sim-out"></div>
+      <div>
+        <div class="mini-ruler" id="sim-ruler"></div>
+        <div class="sim-out" id="sim-out"></div>
+      </div>
     </div>`;
 
   const nEl = $("sim-n");
@@ -245,20 +258,34 @@ function renderSim(models) {
   nEl.value = state.status.config.target_turns;
   kEl.value = state.status.thresholds.keep_recent;
 
+  const win = state.status.thresholds.window;
+  const builtin = state.sessions.builtin_fallback || win;
+
   const update = () => {
     const n = +nEl.value;
     const k = +kEl.value;
     $("sim-n-v").textContent = n;
     $("sim-k-v").textContent = fmt(k);
     const r = computeSpot(models.main, models.summarizer, k, n, memo);
+
+    const W = 1000;
+    const x = (v) => Math.max(0, Math.min(1, v / win)) * W;
+    $("sim-ruler").innerHTML = `<svg viewBox="0 0 ${W} 30" style="height:30px">
+      <rect x="0" y="12" width="${W}" height="6" fill="var(--ink)" opacity="0.06"/>
+      ${r.solvable ? `<rect x="${x(k)}" y="12" width="${Math.max(0, x(r.threshold) - x(k))}" height="6" fill="var(--accent)" opacity="0.5"/>` : ""}
+      <line x1="${x(k)}" y1="6" x2="${x(k)}" y2="24" stroke="var(--ink-3)" stroke-width="1.5"/>
+      ${r.solvable ? `<line x1="${x(r.threshold)}" y1="6" x2="${x(r.threshold)}" y2="24" stroke="var(--accent)" stroke-width="1.5"/>` : ""}
+      <line x1="${x(builtin)}" y1="6" x2="${x(builtin)}" y2="24" stroke="var(--warn)" stroke-width="1.5"/>
+    </svg>`;
+
     $("sim-out").innerHTML = r.solvable
       ? `
-      <div class="sim-line"><span class="k">压缩线</span><span class="v num">${fmt(r.threshold)}</span></div>
-      <div class="sim-line"><span class="k">最小归档段</span><span class="v num">${fmt(r.archive)}</span></div>
-      <div class="sim-line"><span class="k">一次性成本</span><span class="v num">${money(r.once)}</span></div>
-      <div class="sim-line" style="border:none"><span class="k">占模型窗口</span>
-        <span class="v num">${((r.threshold / state.status.thresholds.window) * 100).toFixed(0)}%</span></div>`
-      : `<div class="verdict" data-bad="1">这个回本轮数下无解：摘要模型太贵，省下的还不够付摘要钱。把轮数调大，或换更便宜的压缩模型。</div>`;
+      <div class="row"><span class="k">压缩线</span><span class="v">${fmt(r.threshold)}</span></div>
+      <div class="row"><span class="k">最小归档段</span><span class="v">${fmt(r.archive)}</span></div>
+      <div class="row"><span class="k">压一次成本</span><span class="v">${money(r.once)}</span></div>
+      <div class="row" style="border:none"><span class="k">占窗口</span>
+        <span class="v">${((r.threshold / win) * 100).toFixed(0)}%</span></div>`
+      : `<div class="verdict" data-bad="1">这个轮数下无解：摘要读一遍比省下的还贵。把轮数调大，或者换个便宜的压缩模型。</div>`;
   };
 
   nEl.addEventListener("input", update);
@@ -282,26 +309,24 @@ function renderSim(models) {
   });
 }
 
-/* ---------------- 渲染：台账 ---------------- */
+/* ---------------- 台账 ---------------- */
 
 function renderLedger(l) {
   if (!l.total) {
-    $("ledger-card").innerHTML = `<div class="empty">台账还是空的。插件启用后每次工具调用都会记一条。</div>`;
+    $("ledger").innerHTML = `<div class="empty">台账是空的，插件启用后每次工具调用记一条。</div>`;
     return;
   }
-  const dist = Object.entries(l.counts)
-    .filter(([, v]) => v > 0)
+  const entries = Object.entries(l.counts).filter(([, v]) => v > 0);
+  const dist = entries
     .map(
       ([k, v]) =>
         `<span style="flex-grow:${v};background:${OUTCOME_COLOR[k]}" title="${OUTCOME_TEXT[k]} ${v}"></span>`,
     )
     .join("");
-
-  const legend = Object.entries(l.counts)
-    .filter(([, v]) => v > 0)
+  const legend = entries
     .map(
       ([k, v]) =>
-        `<div class="legend-item"><span class="swatch" style="background:${OUTCOME_COLOR[k]}"></span><b>${OUTCOME_TEXT[k]}</b> · ${v}</div>`,
+        `<div class="legend-item"><span class="swatch" style="background:${OUTCOME_COLOR[k]}"></span><b>${OUTCOME_TEXT[k]}</b> ${v}</div>`,
     )
     .join("");
 
@@ -312,14 +337,13 @@ function renderLedger(l) {
     const buckets = new Array(18).fill(0);
     a.forEach((v) => buckets[Math.min(17, Math.floor((v / (max || 1)) * 17))]++);
     const top = Math.max(...buckets, 1);
-    hist = `<div style="margin-top:26px">
-      <div class="k" style="font-size:12.5px;color:var(--text-3)">归档段大小分布（最大 ${fmtK(max)}）</div>
-      <div class="hist">${buckets.map((b) => `<div class="bar" style="height:${(b / top) * 100}%"></div>`).join("")}</div>
-    </div>`;
+    hist = `<div class="block-label">归档段大小分布，最大 ${fmtK(max)}</div>
+      <div class="hist">${buckets.map((b) => `<div class="bar" style="height:${(b / top) * 100}%"></div>`).join("")}</div>`;
   }
 
   const compacted = l.compacted.length
-    ? `<table style="margin-top:26px"><thead><tr>
+    ? `<div class="block-label">最近压缩</div>
+       <table><thead><tr>
         <th>压缩前</th><th>压缩后</th><th class="right">归档</th><th class="right">摘要</th><th class="right">耗时</th>
       </tr></thead><tbody>${l.compacted
         .slice(-8)
@@ -335,26 +359,26 @@ function renderLedger(l) {
         .join("")}</tbody></table>`
     : "";
 
-  $("ledger-card").innerHTML = `<div class="dist">${dist}</div>
-    <div class="legend" style="border:none;padding-top:0;margin-top:14px">${legend}</div>
+  $("ledger").innerHTML = `<div class="dist">${dist}</div>
+    <div class="legend" style="margin-top:12px">${legend}</div>
     ${hist}${compacted}`;
 }
 
-/* ---------------- 渲染：配置 ---------------- */
+/* ---------------- 配置 ---------------- */
 
 const FIELDS = [
-  ["enable_compact", "bool", "启用 SoL-Astr", "关掉后模型看不到压缩工具，插件完全不介入。"],
-  ["dry_run", "bool", "影子模式", "只记台账，不调摘要模型、不改写历史。先用它观察触发率。"],
-  ["keep_recent_tokens", "int", "保留段 tokens", "填 0 表示按模型窗口自动算（窗口的 15%，最多 40000）。"],
-  ["min_archive_tokens", "int", "最小归档段 tokens", "填 0 表示按价目自动算；价目不可用时退回窗口的 25%。"],
-  ["target_turns", "int", "目标回本轮数", "压缩这笔开销要求在几次 LLM 请求内赚回来。越大压得越早。"],
-  ["strip_tool_trace", "bool", "剥离工具调用痕迹", "压缩成功那一轮，落盘前删掉工具调用记录，免得模型照着复读。"],
+  ["enable_compact", "bool", "启用 SoL-Astr", "关掉后模型看不到压缩工具，插件不介入。"],
+  ["dry_run", "bool", "影子模式", "只记账，不调摘要、不改历史。先看触发率再关。"],
+  ["keep_recent_tokens", "int", "保留段 tokens", "0 = 自动：窗口的 15%，上限 40000。"],
+  ["min_archive_tokens", "int", "最小归档段 tokens", "0 = 自动：按价目反推；价目拿不到退回窗口的 25%。"],
+  ["target_turns", "int", "目标回本轮数", "压缩的一次性开销要求几次请求内赚回来。越大压得越早。"],
+  ["strip_tool_trace", "bool", "剥离工具痕迹", "压缩成功那轮，落盘前删掉工具调用记录，免得模型照着复读。"],
 ];
 
 function renderConfig(status) {
   const c = status.config;
   const core = status.core;
-  $("config-card").innerHTML =
+  $("config").innerHTML =
     FIELDS.map(
       ([key, type, label, hint]) => `
       <div class="form-row">
@@ -366,31 +390,26 @@ function renderConfig(status) {
         }
       </div>`,
     ).join("") +
-    `<button class="primary-btn" id="save-config">保存</button>
-     <div class="sec-head" style="margin:44px 0 0">
-       <h2 style="font-size:19px">核心配置（只读）</h2>
-       <p style="font-size:13.5px">这些在「上下文管理策略」里改，插件不代改。</p>
-     </div>
+    `<div style="margin-top:18px"><button class="btn primary" id="save-config">保存</button></div>
+     <div class="block-label">核心配置，只读，去「上下文管理策略」里改</div>
      <div class="readonly-grid">
        ${[
          ["压缩模型", core.provider_id || "未配置，回落当前聊天模型"],
-         ["压缩提示词来源", core.instruction_source],
-         ["按轮截断 max_turns", core.max_turns],
+         ["提示词来源", core.instruction_source],
+         ["按轮截断", core.max_turns],
          ["溢出策略", core.overflow_strategy || "—"],
          ["内置保留比例", core.keep_recent_ratio],
          ["窗口兜底值", fmt(core.fallback_max_tokens)],
        ]
-         .map(([k, v]) => `<div class="cell"><div class="k">${k}</div><div class="v">${v}</div></div>`)
+         .map(([k, v]) => `<div class="cell"><div class="k">${k}</div><div class="v">${esc(v)}</div></div>`)
          .join("")}
      </div>
-     <details><summary>查看发给摘要模型的完整 prompt</summary><pre>${
-       status.prompt_preview.replace(/</g, "&lt;")
-     }</pre></details>`;
+     <details><summary>发给摘要模型的完整 prompt</summary><pre>${esc(status.prompt_preview)}</pre></details>`;
 
   $("save-config").addEventListener("click", async () => {
     const btn = $("save-config");
     const body = {};
-    $("config-card")
+    $("config")
       .querySelectorAll("[data-key]")
       .forEach((el) => {
         body[el.dataset.key] = el.type === "checkbox" ? el.checked : +el.value;
@@ -417,8 +436,9 @@ async function load() {
     bridge.apiGet("ledger"),
   ]);
   state = { status, models, sessions, ledger };
-  renderHero(status, ledger);
-  renderRuler(sessions);
+  renderStatus(status, ledger);
+  renderRuler(sessions, status.thresholds.window_source);
+  renderSessions(sessions);
   renderModels(models, status);
   renderSim(models);
   renderLedger(ledger);

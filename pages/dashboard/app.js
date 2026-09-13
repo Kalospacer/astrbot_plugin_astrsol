@@ -229,9 +229,10 @@ function renderModels(models, status) {
   if (spot && !spot.solvable) {
     verdict = `<div class="verdict" data-bad="1">${esc(spot.reason)}</div>`;
   } else if (spot) {
-    verdict = `<div class="verdict">在这条线上压一次 <span class="num">${money(spot.one_time_cost)}</span>，
-      之后每轮省 <span class="num">${money(spot.per_round_saving)}</span>，
-      <b>${spot.breakeven_turns.toFixed(1)}</b> 次请求回本（目标 ≤ ${spot.detail.target_turns} 次）。</div>`;
+    verdict = `<div class="verdict">在这条线上压一次花 <span class="num">${money(spot.one_time_cost)}</span>，
+      之后每轮少花 <span class="num">${money(spot.per_round_saving)}</span>。
+      聊到第 <b>${spot.breakeven_turns.toFixed(1)}</b> 轮两条成本线打平，
+      按预期的 ${spot.detail.target_turns} 轮算，净省 <span class="num">${money(spot.net_saving)}</span>。</div>`;
   }
 
   $("models").innerHTML =
@@ -267,7 +268,7 @@ function renderSim(models) {
           <input type="range" id="sim-r" min="0.3" max="0.8" step="0.01" />
         </div>
         <div class="slider-row">
-          <div class="head"><span class="k">目标回本轮数</span><span class="v" id="sim-n-v"></span></div>
+          <div class="head"><span class="k">预期再聊轮数</span><span class="v" id="sim-n-v"></span></div>
           <input type="range" id="sim-n" min="1" max="20" step="1" />
         </div>
         <button class="btn primary" id="sim-apply">应用到配置</button>
@@ -295,7 +296,6 @@ function renderSim(models) {
     $("sim-r-v").textContent = `${(ratio * 100).toFixed(0)}%`;
     $("sim-n-v").textContent = n;
     const r = computeEval(models.main, models.summarizer, keep, archive, memo);
-    const ok = r.be <= n;
 
     const W = 1000;
     const x = (v) => logScale(win)(v) * W;
@@ -307,12 +307,15 @@ function renderSim(models) {
       <line x1="${x(builtin)}" y1="6" x2="${x(builtin)}" y2="24" stroke="var(--warn)" stroke-width="1.5"/>
     </svg>`;
 
+    const net = n * r.saving - r.once;
     $("sim-out").innerHTML = `
       <div class="row"><span class="k">压缩线</span><span class="v">${fmt(line)}</span></div>
       <div class="row"><span class="k">归档段</span><span class="v">${fmt(archive)}</span></div>
       <div class="row"><span class="k">压一次成本</span><span class="v">${money(r.once)}</span></div>
-      <div class="row" style="border:none"><span class="k">回本轮数</span>
-        <span class="v" style="color:${ok ? "var(--ok)" : "var(--danger)"}">${Number.isFinite(r.be) ? r.be.toFixed(1) : "—"}${ok ? "" : "，超目标"}</span></div>`;
+      <div class="row"><span class="k">每轮少花</span><span class="v">${money(r.saving)}</span></div>
+      <div class="row"><span class="k">打平点</span><span class="v">${Number.isFinite(r.be) ? r.be.toFixed(1) + " 轮" : "—"}</span></div>
+      <div class="row" style="border:none"><span class="k">净省（${n} 轮）</span>
+        <span class="v" style="color:${net > 0 ? "var(--ok)" : "var(--danger)"}">${money(net)}</span></div>`;
   };
 
   rEl.addEventListener("input", update);
@@ -399,7 +402,7 @@ const FIELDS = [
   ["keep_recent_tokens", "int", "保留段 tokens", "0 = 自动：窗口的 15%，上限 40000。"],
   ["min_archive_tokens", "int", "最小归档段 tokens", "0 = 自动：压缩线（窗口×比例）减去保留段。手填后压缩线 = 保留段 + 这个数。"],
   ["threshold_ratio", "float", "压缩线比例", "压缩线 = 窗口 × 这个比例，默认 0.72。给内置 82% 兜底留反应区。"],
-  ["target_turns", "int", "目标回本轮数", "在压缩线上压一次，回本轮数不超过它才算划算，超了告警。越大越宽松。"],
+  ["target_turns", "int", "预期再聊轮数", "估计话题结束后还会再聊几轮。净省 = 轮数 × 每轮少花 − 压一次成本，为负就是赔钱。"],
   ["strip_tool_trace", "bool", "剥离工具痕迹", "压缩成功那轮，落盘前删掉工具调用记录，免得模型照着复读。"],
 ];
 

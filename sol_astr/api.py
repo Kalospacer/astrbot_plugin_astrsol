@@ -78,7 +78,7 @@ async def _alerts(plugin, limits: dict) -> list[dict]:
         alerts.append(
             {
                 "level": "error",
-                "title": "这套模型组合永远不回本",
+                "title": "压缩比不压还贵",
                 "body": spot.reason,
                 "fix": "换一个更便宜的压缩模型，或把「目标回本轮数」调大。",
             }
@@ -161,6 +161,8 @@ def _spot_view(spot) -> dict | None:
         "breakeven_turns": spot.breakeven_turns,
         "one_time_cost": spot.one_time_cost,
         "per_round_saving": spot.per_round_saving,
+        "floor_archive": spot.floor_archive,
+        "net_saving": spot.net_saving,
         "detail": spot.detail,
     }
 

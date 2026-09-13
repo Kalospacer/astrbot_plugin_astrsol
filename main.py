@@ -153,6 +153,17 @@ class SoLAstr(Star):
         }
 
         main_entry, summ_entry = await self.priced_pair(umo)
+        target = self.config["target_turns"]
+
+        def _spot(archive: int):
+            if not (main_entry and summ_entry):
+                return None
+            key = (main_entry["id"], summ_entry["id"], keep, archive, target)
+            if key not in self._spot_cache:
+                self._spot_cache[key] = sweet_spot(
+                    main_entry, summ_entry, keep, archive, target
+                )
+            return self._spot_cache[key]
 
         if self.config["min_archive_tokens"]:
             result["min_archive"] = self.config["min_archive_tokens"]
@@ -167,23 +178,24 @@ class SoLAstr(Star):
                 if cap < line - keep:
                     line = keep + cap
                     source = "摘要模型窗口"
-            result["min_archive"] = max(line - keep, 0)
-            result["archive_source"] = source
+            archive = max(line - keep, 0)
 
-        if main_entry and summ_entry:
-            target = self.config["target_turns"]
-            key = (
-                main_entry["id"],
-                summ_entry["id"],
-                keep,
-                result["min_archive"],
-                target,
-            )
-            if key not in self._spot_cache:
-                self._spot_cache[key] = sweet_spot(
-                    main_entry, summ_entry, keep, result["min_archive"], target
-                )
-            result["sweet_spot"] = self._spot_cache[key]
+            spot = _spot(archive)
+            if spot and spot.floor_archive and archive < spot.floor_archive:
+                # 低于经济线的压缩是赔钱买卖，抬到经济线
+                archive = spot.floor_archive
+                source = "经济线"
+                spot = _spot(archive)
+
+            result["min_archive"] = archive
+            result["archive_source"] = source
+            if spot:
+                result["sweet_spot"] = spot
+            return result
+
+        spot = _spot(result["min_archive"])
+        if spot:
+            result["sweet_spot"] = spot
         return result
 
     # ---------- 钩子 ----------

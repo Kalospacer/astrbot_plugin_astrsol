@@ -8,32 +8,14 @@
   "dry_run": {
     "type": "bool",
     "description": "影子模式",
-    "hint": "只记录工具触发台账，不调用摘要模型、不改写上下文。先用它观察触发率。",
+    "hint": "只记录工具触发台账和判账结果，不调用摘要模型、不改写上下文。先用它观察触发率。",
     "default": true
   },
   "keep_recent_tokens": {
     "type": "int",
-    "description": "保留最近多少 token（0 = 按模型窗口自动算）",
-    "hint": "压缩时按整轮保留最近这么多 token。0 表示自动：取窗口的 15%，最多 40000。保留段越大压缩越不划算，因为压缩后首轮要按未命中价重建它。",
+    "description": "保留最近多少 token",
+    "hint": "压缩时按整轮保留最近这么多 token。0 表示默认 20000（SoL-Pi 源码 DEFAULT_KEEP_RECENT_TOKENS）。保留段越大压缩越不划算，因为压缩后首轮要按未命中价重建它。",
     "default": 0
-  },
-  "min_archive_tokens": {
-    "type": "int",
-    "description": "归档段至少多少 token 才压（0 = 按压缩线自动算）",
-    "hint": "0 表示自动：压缩线（窗口 × 0.72）减去保留段；摘要模型窗口装不下时线会提前；低于经济线会被抬高。手填后压缩线 = 保留段 + 这个数，上面的经济优先开关失效。",
-    "default": 0
-  },
-  "economy_first": {
-    "type": "bool",
-    "description": "经济优先",
-    "hint": "打开后压缩线直接画在经济线上：最省钱，话题一结束、归档段够经济线就压；关闭则按窗口的 72% 画，原文看到饱。不知道填什么就别动它，默认是给长期陪伴的场景准备的。",
-    "default": false
-  },
-  "target_turns": {
-    "type": "int",
-    "description": "几轮内打平才允许压",
-    "hint": "一次压缩是一笔押注：最坏情况是压完你再也不聊，白花这一次的钱。这个数是给押注定的纪律——几轮内打平不了，说明这套模型组合不配压。不是预测，是上限。",
-    "default": 5
   },
   "strip_tool_trace": {
     "type": "bool",

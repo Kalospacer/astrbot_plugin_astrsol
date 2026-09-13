@@ -6,12 +6,30 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from .economics import MEMO_TOKENS, effective_cache_read
+from .economics import (
+    FIRST_HORIZON_SCALE,
+    MEMO_ESTIMATE,
+    SUBSEQUENT_MARGIN,
+    WINDOW_RESERVE,
+    decide,
+    effective_cache_read,
+)
 from .split import TOOL_NAME
+from .state import average_increment
 from .summarize import build_prompt
 
 PER_MILLION = 1_000_000
-OUTCOMES = ("not_called", "too_small", "dry_run", "empty_summary", "compacted")
+OUTCOMES = (
+    "compacted",
+    "dry_run",
+    "empty_summary",
+    "non_positive_saving",
+    "horizon_unavailable",
+    "price_unavailable",
+    "deferred_economic",
+    "deferred_subsequent_margin",
+    "deferred_carried_debt",
+)
 
 
 def _model_view(entry: dict | None, model_name: str, role: str) -> dict:
@@ -44,7 +62,7 @@ def _model_view(entry: dict | None, model_name: str, role: str) -> dict:
     return view
 
 
-async def _alerts(plugin, limits: dict) -> list[dict]:
+async def _alerts(plugin) -> list[dict]:
     """正在悄悄让插件不工作的东西。这些现在只出现在 error 日志里，没人会看。"""
     alerts: list[dict] = []
     compression = plugin.compression_config()
@@ -73,24 +91,13 @@ async def _alerts(plugin, limits: dict) -> list[dict]:
             }
         )
 
-    spot = limits.get("sweet_spot")
-    if spot is not None and not spot.solvable:
-        alerts.append(
-            {
-                "level": "error",
-                "title": "压缩比不压还贵",
-                "body": spot.reason,
-                "fix": "换一个更便宜的压缩模型，或把「目标回本轮数」调大。",
-            }
-        )
-
     if plugin.catalog.error:
         alerts.append(
             {
                 "level": "warn",
                 "title": "拿不到 OpenRouter 价目",
-                "body": f"{plugin.catalog.error}。压缩线按窗口画，不受影响；"
-                "只是算不出这套组合划不划算。",
+                "body": f"{plugin.catalog.error}。没有价目就算不了经济账，"
+                "判账全部缺席，只剩窗口保护线能触发压缩。",
                 "fix": "检查容器能否访问 openrouter.ai。",
             }
         )
@@ -109,11 +116,63 @@ async def _personas_blocking_tool(plugin) -> list[str]:
     return blocked
 
 
+def _state_view(st: dict) -> dict:
+    """一份会话状态在面板上的样子。"""
+    inc = average_increment(st)
+    return {
+        "request_count": st["request_count"],
+        "average_increment": round(inc, 1) if inc else None,
+        "boundary_intervals": st["boundary_counts"],
+        "compaction_count": st["compaction_count"],
+        "carried_debt": round(st["carried_debt"], 6),
+        "debt_repayment": round(st["debt_repayment"], 6),
+    }
+
+
+async def _live_decision(plugin, limits: dict) -> dict | None:
+    """拿用量最大的会话当样本，现场判一次账给面板看。"""
+    conversations = await plugin.context.conversation_manager.get_conversations()
+    rows = [c for c in conversations if c.token_usage]
+    if not rows:
+        return None
+    sample = max(rows, key=lambda c: c.token_usage)
+
+    key = sample.cid or sample.user_id
+    st = plugin.states.get(key)
+    main_entry, summ_entry = await plugin.priced_pair()
+    archive = max(0, sample.token_usage - limits["keep_recent"])
+    d = decide(
+        write_tokens=sample.token_usage,
+        archive_tokens=archive,
+        context_window=limits["window"],
+        keep_recent=limits["keep_recent"],
+        average_increment=average_increment(st),
+        prior_compactions=st["compaction_count"],
+        carried_debt=st["carried_debt"],
+        debt_repayment=st["debt_repayment"],
+        main=main_entry,
+        summarizer=summ_entry,
+    )
+    return {
+        "sample_cid": sample.cid,
+        "sample_title": sample.title or "未命名会话",
+        "sample_tokens": sample.token_usage,
+        "archive_estimate": archive,
+        "compact": d.compact,
+        "reason": d.reason,
+        "window_protection": d.window_protection,
+        "breakeven_requests": d.breakeven_requests,
+        "horizon_requests": d.horizon_requests,
+        "one_time_cost": d.one_time_cost,
+        "per_request_saving": d.per_request_saving,
+        "carried_debt": d.carried_debt,
+    }
+
+
 async def status(plugin) -> dict:
-    """面板主数据：当前模式、阈值三件套及其来源、告警。"""
-    limits = await plugin.thresholds()
+    """面板主数据：模式、四根参照线、判账常量、样本判账、告警。"""
+    limits = await plugin.limits()
     compression = plugin.compression_config()
-    spot = limits.get("sweet_spot")
 
     mode = "off"
     if plugin.config["enable_compact"]:
@@ -122,17 +181,14 @@ async def status(plugin) -> dict:
     return {
         "mode": mode,
         "enabled": plugin.enabled,
-        "thresholds": {
-            "keep_recent": limits["keep_recent"],
-            "min_archive": limits["min_archive"],
-            "threshold": limits["keep_recent"] + limits["min_archive"],
-            "window": limits["window"],
-            "builtin_fallback": int(limits["window"] * 0.82),
-            "keep_source": limits["keep_source"],
-            "archive_source": limits["archive_source"],
-            "window_source": limits["window_source"],
+        "limits": limits,
+        "constants": {
+            "memo_estimate": MEMO_ESTIMATE,
+            "window_reserve": WINDOW_RESERVE,
+            "first_horizon_scale": FIRST_HORIZON_SCALE,
+            "subsequent_margin": SUBSEQUENT_MARGIN,
         },
-        "sweet_spot": _spot_view(spot),
+        "live_decision": await _live_decision(plugin, limits),
         "config": {k: plugin.config[k] for k in plugin.config.keys()},
         "core": {
             "provider_id": compression.get("provider_id", ""),
@@ -146,23 +202,7 @@ async def status(plugin) -> dict:
             else "插件默认",
         },
         "prompt_preview": build_prompt(plugin.summarize_instruction()),
-        "alerts": await _alerts(plugin, limits),
-    }
-
-
-def _spot_view(spot) -> dict | None:
-    if spot is None:
-        return None
-    return {
-        "solvable": spot.solvable,
-        "reason": spot.reason,
-        "min_archive": spot.min_archive,
-        "breakeven_turns": spot.breakeven_turns,
-        "one_time_cost": spot.one_time_cost,
-        "per_round_saving": spot.per_round_saving,
-        "floor_archive": spot.floor_archive,
-        "net_saving": spot.net_saving,
-        "detail": spot.detail,
+        "alerts": await _alerts(plugin),
     }
 
 
@@ -176,7 +216,7 @@ async def models(plugin) -> dict:
         "catalog_size": len(plugin.catalog.models),
         "catalog_error": plugin.catalog.error,
         "fetched_at": plugin.catalog.fetched_at,
-        "memo_tokens": MEMO_TOKENS,
+        "memo_tokens": MEMO_ESTIMATE,
         "main": _model_view(
             main_entry, main_provider.get_model() if main_provider else "", "主模型"
         ),
@@ -187,26 +227,27 @@ async def models(plugin) -> dict:
 
 
 async def sessions(plugin, limit: int = 40) -> dict:
-    """各会话当前用量，标尺的游标就是它们。"""
-    limits = await plugin.thresholds()
+    """各会话当前用量和判账状态，标尺的游标就是它们。"""
+    limits = await plugin.limits()
     conversations = await plugin.context.conversation_manager.get_conversations()
-    rows = [
-        {
-            "cid": c.cid,
-            "title": c.title or "未命名会话",
-            "user_id": c.user_id,
-            "tokens": c.token_usage,
-            "updated_at": c.updated_at,
-        }
-        for c in conversations
-        if c.token_usage
-    ]
+    rows = []
+    for c in conversations:
+        if not c.token_usage:
+            continue
+        st = plugin.states.get(c.cid or c.user_id)
+        rows.append(
+            {
+                "cid": c.cid,
+                "title": c.title or "未命名会话",
+                "user_id": c.user_id,
+                "tokens": c.token_usage,
+                "updated_at": c.updated_at,
+                "state": _state_view(st),
+            }
+        )
     rows.sort(key=lambda r: r["tokens"], reverse=True)
     return {
-        "threshold": limits["keep_recent"] + limits["min_archive"],
-        "keep_recent": limits["keep_recent"],
-        "window": limits["window"],
-        "builtin_fallback": int(limits["window"] * 0.82),
+        "limits": limits,
         "total": len(rows),
         "sessions": rows[:limit],
     }
@@ -224,24 +265,18 @@ def _read_ledger(path: Path, limit: int) -> list[dict]:
 
 
 def ledger_view(plugin, limit: int = 200) -> dict:
-    """台账聚合。触发率是判断这插件值不值得开的首要依据。"""
+    """台账聚合。压缩率和退回原因是判断这插件值不值得开的首要依据。"""
     rows = _read_ledger(plugin.ledger_path, limit)
     counts = Counter(r.get("outcome", "unknown") for r in rows)
 
-    called = sum(
-        counts[o] for o in ("too_small", "dry_run", "empty_summary", "compacted")
-    )
-    eligible = called + counts["not_called"]
-
+    compacted = [r for r in rows if r.get("outcome") == "compacted"]
     archives = [r["archive_tokens"] for r in rows if r.get("archive_tokens")]
     durations = [r["duration_ms"] for r in rows if r.get("duration_ms")]
-    compacted = [r for r in rows if r.get("outcome") == "compacted"]
 
     return {
         "total": len(rows),
         "counts": {o: counts[o] for o in OUTCOMES},
-        "call_rate": (called / eligible) if eligible else 0.0,
-        "eligible": eligible,
+        "compact_rate": (len(compacted) / len(rows)) if rows else 0.0,
         "archive_tokens": archives,
         "duration_ms_avg": (sum(durations) / len(durations)) if durations else 0,
         "compacted": [
@@ -252,6 +287,7 @@ def ledger_view(plugin, limit: int = 200) -> dict:
                 "archive": r.get("archive_tokens", 0),
                 "memo": r.get("memo_tokens", 0),
                 "duration_ms": r.get("duration_ms", 0),
+                "reason": r.get("reason", ""),
             }
             for r in compacted
         ],
@@ -268,5 +304,5 @@ def save_config(plugin, body: dict) -> dict:
             plugin.config[key] = value
             written[key] = value
     plugin.config.save_config()
-    plugin._spot_cache.clear()
+    plugin._model_cache.clear()
     return {"ok": True, "written": written}

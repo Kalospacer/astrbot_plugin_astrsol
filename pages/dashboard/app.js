@@ -5,18 +5,36 @@ const $ = (id) => document.getElementById(id);
 
 const MODE_TEXT = { off: "未启用", dry_run: "影子模式", live: "生效中" };
 const OUTCOME_TEXT = {
-  not_called: "够格没调",
-  too_small: "归档段太小",
+  compacted: "已压缩",
   dry_run: "影子记录",
   empty_summary: "摘要为空",
-  compacted: "已压缩",
+  non_positive_saving: "没啥可压",
+  horizon_unavailable: "估不出轮数",
+  price_unavailable: "没价目",
+  deferred_economic: "不划算",
+  deferred_subsequent_margin: "间隔太短",
+  deferred_carried_debt: "旧债没还完",
 };
 const OUTCOME_COLOR = {
-  not_called: "var(--ink-3)",
-  too_small: "#a1a1aa",
+  compacted: "var(--accent)",
   dry_run: "var(--warn)",
   empty_summary: "var(--danger)",
-  compacted: "var(--accent)",
+  non_positive_saving: "var(--ink-3)",
+  horizon_unavailable: "var(--ink-3)",
+  price_unavailable: "var(--warn)",
+  deferred_economic: "#a1a1aa",
+  deferred_subsequent_margin: "#a1a1aa",
+  deferred_carried_debt: "#a1a1aa",
+};
+const REASON_TEXT = {
+  economic: "划算",
+  window_protection: "越过窗口保护线，无条件压",
+  non_positive_saving: "归档段还没 memo 长，压不出节省",
+  horizon_unavailable: "还没有增速数据，估不出还能聊几轮",
+  price_unavailable: "拿不到价目，经济账算不了",
+  deferred_economic: "打平轮数 > 估计还能聊的轮数",
+  deferred_subsequent_margin: "距上次压缩太短，打平轮数 ×1.5 还不够",
+  deferred_carried_debt: "上一次压缩的成本还没省回来",
 };
 
 const esc = (s) =>
@@ -38,7 +56,7 @@ let state = {};
 /* ---------------- 状态读出 ---------------- */
 
 function renderStatus(status, ledger) {
-  const t = status.thresholds;
+  const t = status.limits;
   const tag = $("mode-tag");
   tag.dataset.mode = status.mode;
   tag.textContent = MODE_TEXT[status.mode] || status.mode;
@@ -47,17 +65,17 @@ function renderStatus(status, ledger) {
     status.mode === "off"
       ? "插件没开。到下面配置里打开总开关，模型才看得见压缩工具。"
       : status.mode === "dry_run"
-        ? "影子模式：流程照跑，不动历史，只记账。"
-        : `生效中。上下文过 ${fmt(t.threshold)} 就建议模型压缩。`;
+        ? "影子模式：账照算，不动历史，只记账。"
+        : "生效中。话题翻篇时模型叫插件算账：划算就压；越过窗口保护线无条件压。";
 
-  const rate = ledger.eligible ? `${(ledger.call_rate * 100).toFixed(0)}%` : "—";
+  const rate = ledger.total ? `${(ledger.compact_rate * 100).toFixed(0)}%` : "—";
   const cells = [
-    ["压缩线", fmtK(t.threshold), "tokens", `窗口的 ${((t.threshold / t.window) * 100).toFixed(0)}% · 保留 ${fmtK(t.keep_recent)}`],
+    ["窗口保护线", fmtK(t.window_protection), "tokens", `窗口 − ${fmt(status.constants.window_reserve)}，过线必压`],
     ["窗口", fmtK(t.window), "tokens", `来源 ${esc(t.window_source)}`],
-    ["触发率", rate, "", ledger.eligible ? `${ledger.counts.not_called} 次够格没调` : "还没数据"],
+    ["压缩率", rate, "", ledger.total ? `${ledger.total} 次判账` : "还没数据"],
     [
       "已压缩",
-      String(ledger.counts.compacted),
+      String(ledger.counts.compacted || 0),
       "次",
       ledger.duration_ms_avg ? `平均 ${(ledger.duration_ms_avg / 1000).toFixed(1)}s` : "没发生过",
     ],
@@ -95,7 +113,11 @@ function logScale(win) {
 }
 
 function renderRuler(sessions, source) {
-  const { window: win, threshold, keep_recent, builtin_fallback, sessions: rows } = sessions;
+  const { limits, sessions: rows } = sessions;
+  const win = limits.window;
+  const keep = limits.keep_recent;
+  const prot = limits.window_protection;
+  const core = limits.core_fallback;
   const W = 1000;
   const H = 120;
   const y = 54;
@@ -114,28 +136,27 @@ function renderRuler(sessions, source) {
   }
 
   const zones = `
-    <rect x="0" y="${y - 8}" width="${x(keep_recent)}" height="16" fill="var(--ink)" opacity="0.08"/>
-    <rect x="${x(keep_recent)}" y="${y - 8}" width="${x(threshold) - x(keep_recent)}" height="16" fill="var(--ink)" opacity="0.03"/>
-    <rect x="${x(threshold)}" y="${y - 8}" width="${Math.max(0, x(builtin_fallback) - x(threshold))}" height="16" fill="var(--accent-soft)"/>
-    <rect x="${x(builtin_fallback)}" y="${y - 8}" width="${W - x(builtin_fallback)}" height="16" fill="url(#hatch)"/>
-    <rect x="${x(builtin_fallback)}" y="${y - 8}" width="${W - x(builtin_fallback)}" height="16" fill="var(--warn-bg)"/>
+    <rect x="0" y="${y - 8}" width="${x(keep)}" height="16" fill="var(--ink)" opacity="0.08"/>
+    <rect x="${x(keep)}" y="${y - 8}" width="${Math.max(0, x(prot) - x(keep))}" height="16" fill="var(--accent-soft)"/>
+    <rect x="${x(prot)}" y="${y - 8}" width="${W - x(prot)}" height="16" fill="url(#hatch)"/>
+    <rect x="${x(prot)}" y="${y - 8}" width="${W - x(prot)}" height="16" fill="var(--warn-bg)"/>
     <line x1="0" y1="${y + 8}" x2="${W}" y2="${y + 8}" stroke="var(--line)" stroke-width="1"/>`;
 
-  const tick = (v, label, color, above) => `
-    <line x1="${x(v)}" y1="${above ? y - 22 : y + 8}" x2="${x(v)}" y2="${above ? y - 8 : y + 20}" stroke="${color}" stroke-width="1.5"/>
+  const tick = (v, label, color, above, dash) => `
+    <line x1="${x(v)}" y1="${above ? y - 22 : y + 8}" x2="${x(v)}" y2="${above ? y - 8 : y + 20}" stroke="${color}" stroke-width="1.5" ${dash ? 'stroke-dasharray="3 2"' : ""}/>
     <text x="${x(v)}" y="${above ? y - 30 : y + 34}" fill="${color}" font-size="11.5"
       font-family="var(--mono)" text-anchor="middle">${label}</text>`;
 
   const ticks =
-    tick(threshold, `压缩线 ${fmtK(threshold)}`, "var(--accent)", true) +
-    tick(keep_recent, `保留 ${fmtK(keep_recent)}`, "var(--ink-3)", false) +
-    tick(builtin_fallback, `兜底 ${fmtK(builtin_fallback)}`, "var(--warn)", false);
+    tick(prot, `保护线 ${fmtK(prot)}`, "var(--warn)", true) +
+    tick(keep, `保留 ${fmtK(keep)}`, "var(--ink-3)", false) +
+    tick(core, `核心 ${fmtK(core)}`, "var(--ink-3)", false, true);
 
   const rugs = rows
     .map((s) => {
-      const over = s.tokens >= threshold;
+      const over = s.tokens >= prot;
       return `<line x1="${x(s.tokens)}" y1="${y + 10}" x2="${x(s.tokens)}" y2="${y + 26}"
-        stroke="${over ? "var(--accent)" : "var(--ink-3)"}" stroke-width="2"
+        stroke="${over ? "var(--warn)" : "var(--ink-3)"}" stroke-width="2"
         opacity="${over ? 0.95 : 0.4}" stroke-linecap="round">
         <title>${esc(s.title)} · ${esc(s.user_id)} · ${fmt(s.tokens)} tokens</title></line>`;
     })
@@ -148,38 +169,41 @@ function renderRuler(sessions, source) {
     ${grid.join("")}${zones}${ticks}${rugs}
   </svg>`;
 
-  const over = rows.filter((s) => s.tokens >= threshold).length;
+  const over = rows.filter((s) => s.tokens >= prot).length;
   $("ruler-legend").innerHTML =
     [
       ["rgba(128,128,128,0.15)", "保留段", "压缩后原样留下的最近对话"],
-      ["var(--accent-soft)", "可压缩区", `${over} 个会话已过线`],
-      ["var(--warn-bg)", "内置兜底区", "到这里核心自己动手"],
+      ["var(--accent-soft)", "判账区", "话题翻篇时算账，划算就压"],
+      ["var(--warn-bg)", "保护区", `${over} 个会话在这里，无条件压`],
     ]
       .map(
         ([c, k, v]) =>
           `<div class="legend-item"><span class="swatch" style="background:${c}"></span><b>${k}</b> ${v}</div>`,
       )
       .join("") +
-    `<div class="legend-item">竖线 = 会话用量，紫色已过线</div>`;
+    `<div class="legend-item">虚线 = 核心 82% 兜底（它不翻篇也压），竖线 = 会话用量</div>`;
 }
 
 /* ---------------- 会话 ---------------- */
 
 function renderSessions(sessions) {
-  const { threshold, sessions: rows } = sessions;
+  const { limits, sessions: rows } = sessions;
+  const prot = limits.window_protection;
   $("sessions").innerHTML = rows.length
-    ? `<table><thead><tr><th>会话</th><th class="right">用量</th><th class="right">距压缩线</th></tr></thead>
+    ? `<table><thead><tr><th>会话</th><th class="right">用量</th><th class="right">每轮增量</th><th class="right">已压</th></tr></thead>
        <tbody>${rows
          .slice(0, 12)
          .map((s) => {
-           const gap = threshold - s.tokens;
+           const over = s.tokens >= prot;
            const named = s.title && s.title !== "未命名会话";
+           const inc = s.state && s.state.average_increment;
+           const comp = s.state ? s.state.compaction_count : 0;
            return `<tr><td>${esc(named ? s.title : s.user_id)}${
              named ? `<div class="umo">${esc(s.user_id)}</div>` : ""
            }</td>
-             <td class="right num">${fmt(s.tokens)}</td>
-             <td class="right num" style="color:${gap <= 0 ? "var(--accent)" : "var(--ink-3)"}">
-               ${gap <= 0 ? "已过线" : `还差 ${fmt(gap)}`}</td></tr>`;
+             <td class="right num" style="color:${over ? "var(--warn)" : "inherit"}">${fmt(s.tokens)}</td>
+             <td class="right num">${inc ? fmt(Math.round(inc)) : "—"}</td>
+             <td class="right num">${comp || "—"}</td></tr>`;
          })
          .join("")}</tbody></table>`
     : `<div class="empty">还没有会话用量，聊几轮再来。</div>`;
@@ -224,14 +248,21 @@ function renderModels(models, status) {
     $("models").innerHTML = `<div class="empty">拿不到 OpenRouter 价目：${esc(models.catalog_error)}</div>`;
     return;
   }
-  const spot = status.sweet_spot;
-  let verdict = `<div class="verdict">价目齐全，还没算出结论。</div>`;
-  if (spot && !spot.solvable) {
-    verdict = `<div class="verdict" data-bad="1">${esc(spot.reason)}</div>`;
-  } else if (spot) {
-    verdict = `<div class="verdict">在这条线上压一次花 <span class="num">${money(spot.one_time_cost)}</span>，
-      之后每轮少花 <span class="num">${money(spot.per_round_saving)}</span>。
-      最坏情况是压完你再也不聊：这笔钱白花；聊到第 <b>${spot.breakeven_turns.toFixed(1)}</b> 轮打平，之后都是净省。</div>`;
+  const d = status.live_decision;
+  let verdict = `<div class="verdict">还没有会话数据，聊几轮后这里会现场判一次账。</div>`;
+  if (d) {
+    const head = `拿「${esc(d.sample_title)}」（${fmtK(d.sample_tokens)}）现场判账：`;
+    verdict = d.compact
+      ? `<div class="verdict">${head}<b>现在压</b>——${esc(REASON_TEXT[d.reason] || d.reason)}。
+        压一次花 <span class="num">${money(d.one_time_cost)}</span>，之后每轮少花
+        <span class="num">${money(d.per_request_saving)}</span>${
+          d.breakeven_requests ? `，第 <b>${d.breakeven_requests.toFixed(1)}</b> 轮打平` : ""
+        }。</div>`
+      : `<div class="verdict" data-bad="1">${head}<b>先不压</b>——${esc(REASON_TEXT[d.reason] || d.reason)}${
+          d.breakeven_requests && d.horizon_requests != null
+            ? `（打平 ${d.breakeven_requests.toFixed(1)} 轮，估计还能聊 ${d.horizon_requests} 轮）`
+            : ""
+        }。</div>`;
   }
 
   $("models").innerHTML =
@@ -241,6 +272,8 @@ function renderModels(models, status) {
 
 /* ---------------- 模拟 ---------------- */
 
+/* 判账的前端复刻，公式与 sol_astr/economics.py 保持一致。 */
+
 function computeEval(main, summ, keep, archive, memo) {
   const pi = main.price.input / 1e6;
   const pc = main.price.cache_read_effective / 1e6;
@@ -248,7 +281,7 @@ function computeEval(main, summ, keep, archive, memo) {
   const si = summ.price.input / 1e6;
   const so = summ.price.output / 1e6;
   const once = (keep + memo) * (pi - pc + pw) + archive * si + memo * so;
-  const saving = archive * pc;
+  const saving = Math.max(0, archive - memo) * pc;
   const be = saving > 0 ? once / saving : Infinity;
   return { once, saving, be };
 }
@@ -259,14 +292,31 @@ function renderSim(models) {
     return;
   }
   const memo = models.memo_tokens;
+  const win = state.status.limits.window;
+  const prot = state.status.limits.window_protection;
+  const keep0 = state.status.limits.keep_recent;
+  const live = state.status.live_decision;
+  const inc0 =
+    (state.sessions.sessions.find((s) => s.state && s.state.average_increment) || {}).state
+      ?.average_increment || 3000;
+  const arch0 = live ? live.archive_estimate : 60000;
+
   $("sim").innerHTML = `
     <div class="sim">
       <div>
         <div class="slider-row">
-          <div class="head"><span class="k">假设再聊轮数</span><span class="v" id="sim-n-v"></span></div>
-          <input type="range" id="sim-n" min="1" max="20" step="1" />
+          <div class="head"><span class="k">保留段</span><span class="v" id="sim-k-v"></span></div>
+          <input type="range" id="sim-k" min="2000" max="100000" step="1000" />
         </div>
-        <button class="btn primary" id="sim-apply">应用到配置</button>
+        <div class="slider-row">
+          <div class="head"><span class="k">假设归档段</span><span class="v" id="sim-a-v"></span></div>
+          <input type="range" id="sim-a" min="5000" max="500000" step="5000" />
+        </div>
+        <div class="slider-row">
+          <div class="head"><span class="k">每轮增量</span><span class="v" id="sim-i-v"></span></div>
+          <input type="range" id="sim-i" min="500" max="20000" step="500" />
+        </div>
+        <button class="btn primary" id="sim-apply">保留段写进配置</button>
       </div>
       <div>
         <div class="mini-ruler" id="sim-ruler"></div>
@@ -274,42 +324,47 @@ function renderSim(models) {
       </div>
     </div>`;
 
-  const nEl = $("sim-n");
-  nEl.value = state.status.config.target_turns;
-
-  const win = state.status.thresholds.window;
-  const keep = state.status.thresholds.keep_recent;
-  const line = state.sessions.threshold;
-  const archive = Math.max(line - keep, 0);
-  const builtin = state.sessions.builtin_fallback || win;
+  const kEl = $("sim-k");
+  const aEl = $("sim-a");
+  const iEl = $("sim-i");
+  kEl.value = keep0;
+  aEl.value = Math.min(500000, Math.max(5000, arch0));
+  iEl.value = Math.min(20000, Math.max(500, Math.round(inc0 / 500) * 500));
 
   const update = () => {
-    const n = +nEl.value;
-    $("sim-n-v").textContent = n;
+    const keep = +kEl.value;
+    const archive = +aEl.value;
+    const inc = +iEl.value;
+    $("sim-k-v").textContent = fmtK(keep);
+    $("sim-a-v").textContent = fmtK(archive);
+    $("sim-i-v").textContent = fmt(inc);
+
     const r = computeEval(models.main, models.summarizer, keep, archive, memo);
+    const used = keep + archive;
+    const horizon = Math.max(0, Math.floor((win - used) / inc));
+    const go = r.be <= horizon && archive > memo;
 
     const W = 1000;
     const x = (v) => logScale(win)(v) * W;
     $("sim-ruler").innerHTML = `<svg viewBox="0 0 ${W} 30" style="height:30px">
       <rect x="0" y="12" width="${W}" height="6" fill="var(--ink)" opacity="0.06"/>
-      <rect x="${x(keep)}" y="12" width="${Math.max(0, x(line) - x(keep))}" height="6" fill="var(--accent)" opacity="0.5"/>
+      <rect x="${x(keep)}" y="12" width="${Math.max(0, x(used) - x(keep))}" height="6" fill="var(--accent)" opacity="0.5"/>
       <line x1="${x(keep)}" y1="6" x2="${x(keep)}" y2="24" stroke="var(--ink-3)" stroke-width="1.5"/>
-      <line x1="${x(line)}" y1="6" x2="${x(line)}" y2="24" stroke="var(--accent)" stroke-width="1.5"/>
-      <line x1="${x(builtin)}" y1="6" x2="${x(builtin)}" y2="24" stroke="var(--warn)" stroke-width="1.5"/>
+      <line x1="${x(used)}" y1="6" x2="${x(used)}" y2="24" stroke="var(--accent)" stroke-width="1.5"/>
+      <line x1="${x(prot)}" y1="6" x2="${x(prot)}" y2="24" stroke="var(--warn)" stroke-width="1.5"/>
     </svg>`;
 
-    const net = n * r.saving - r.once;
     $("sim-out").innerHTML = `
-      <div class="row"><span class="k">压缩线</span><span class="v">${fmt(line)}</span></div>
-      <div class="row"><span class="k">归档段</span><span class="v">${fmt(archive)}</span></div>
       <div class="row"><span class="k">压一次成本</span><span class="v">${money(r.once)}</span></div>
       <div class="row"><span class="k">每轮少花</span><span class="v">${money(r.saving)}</span></div>
-      <div class="row"><span class="k">打平点</span><span class="v">${Number.isFinite(r.be) ? r.be.toFixed(1) + " 轮" : "—"}</span></div>
-      <div class="row" style="border:none"><span class="k">净省（${n} 轮）</span>
-        <span class="v" style="color:${net > 0 ? "var(--ok)" : "var(--danger)"}">${money(net)}</span></div>`;
+      <div class="row"><span class="k">打平轮数</span><span class="v">${Number.isFinite(r.be) ? r.be.toFixed(1) : "—"}</span></div>
+      <div class="row"><span class="k">窗口还装得下</span><span class="v">${horizon} 轮</span></div>
+      <div class="row" style="border:none"><span class="k">首次压缩判决</span>
+        <span class="v" style="color:${go ? "var(--ok)" : "var(--danger)"}">${go ? "压" : "不压"}</span></div>
+      <div class="footnote">后续压缩更严：打平轮数 ×1.5 还要 ≤ 装得下的轮数，且上一次的债得先还清。</div>`;
   };
 
-  nEl.addEventListener("input", update);
+  [kEl, aEl, iEl].forEach((el) => el.addEventListener("input", update));
   update();
 
   $("sim-apply").addEventListener("click", async () => {
@@ -317,12 +372,12 @@ function renderSim(models) {
     btn.disabled = true;
     btn.textContent = "保存中…";
     await bridge.apiPost("config", {
-      target_turns: +nEl.value,
+      keep_recent_tokens: +kEl.value,
     });
     btn.textContent = "已应用";
     setTimeout(() => {
       btn.disabled = false;
-      btn.textContent = "应用到配置";
+      btn.textContent = "保留段写进配置";
       load();
     }, 700);
   });
@@ -387,11 +442,8 @@ function renderLedger(l) {
 
 const FIELDS = [
   ["enable_compact", "bool", "启用 SoL-Astr", "关掉后模型看不到压缩工具，插件不介入。"],
-  ["dry_run", "bool", "影子模式", "只记账，不调摘要、不改历史。先看触发率再关。"],
-  ["keep_recent_tokens", "int", "保留段 tokens", "0 = 自动：窗口的 15%，上限 40000。"],
-  ["economy_first", "bool", "经济优先", "打开：压缩线画在经济线上，话题一结束、够本就压，最省钱。关闭：按窗口 72% 画，原文看到饱。不知道填什么就开它。"],
-  ["min_archive_tokens", "int", "手动指定归档段 tokens", "一般别动，0 = 自动（跟压缩线走）。填了就覆盖上面两种自动逻辑：压缩线 = 保留段 + 这个数。"],
-  ["target_turns", "int", "几轮内打平", "压缩是押注：最坏情况是压完不再聊，白花压一次的钱。这个数是给押注定的纪律——几轮内打平不了，这套组合就不配压。"],
+  ["dry_run", "bool", "影子模式", "账照算，不调摘要、不改历史。先看判账记录再关。"],
+  ["keep_recent_tokens", "int", "保留段 tokens", "0 = 默认 20000（SoL-Pi 源码 DEFAULT_KEEP_RECENT_TOKENS）。压缩后原样留下的最近对话。"],
   ["strip_tool_trace", "bool", "剥离工具痕迹", "压缩成功那轮，落盘前删掉工具调用记录，免得模型照着复读。"],
 ];
 
@@ -458,7 +510,7 @@ async function load() {
   ]);
   state = { status, models, sessions, ledger };
   renderStatus(status, ledger);
-  renderRuler(sessions, status.thresholds.window_source);
+  renderRuler(sessions, status.limits.window_source);
   renderSessions(sessions);
   renderModels(models, status);
   renderSim(models);

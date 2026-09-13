@@ -1,43 +1,62 @@
-"""压缩的经济账：两条烧钱曲线比谁缓。
+"""压缩判账：SoL-Pi online-context-compact 的移植。
 
-钱花出去不会回来，没有什么"回本"：
+上游源码：NVlabs/SoL-Pi src/sol-pi/extensions/online-context-compact/economics.ts
+（项目页 https://nvlabs.github.io/SoL-Pi/ ，没有论文，算法以源码为准）。
 
-- 不压：每轮按缓存读价重读整个上下文，越聊越贵
-- 压：一次性付 C = (K+M)(Pi−Pc+Pw) + A·Si + M·So，之后每轮少花 S = A×Pc
+与上游一一对应：
 
-聊到第 C/S 轮，两条累计曲线打平；再往后压的那条一直更低。C/S 随归档段 A
-单调下降（固定成本被摊薄），所以高的线在经济上只会更划算，它的代价是：
-话题早早结束、没到线的对话一次都压不到，那些轮次一直在按全价缓存读烧钱。
+- 没有"压缩线"。每次话题边界现场算一笔账：打平轮数 = 一次性成本 ÷ 每轮少花；
+  打平轮数 ≤ 估计还能聊的轮数，才压。估计轮数用「窗口还装得下几轮」封顶
+  （estimateRemainingRequests 的 windowRequestUpperBound）。
+- 窗口保护线 = 窗口 − 16384（windowReserveTokens）：过线无条件压，不算经济账。
+- 首次压缩视野 ×2（firstCompactionRequestScale），后续压缩更严：打平轮数
+  ×1.5（subsequentCompactionMargin）仍 ≤ 估计轮数，且带上前一次没还完的债
+  合并计算仍 ≤ 估计轮数。
+- 债：一次压缩的一次性成本记为债，之后每轮按「每轮少花」偿还；没还完又压，
+  合并门槛卡你（combinedBreakevenRequests）。
 
-经济线 = 让 "N 轮净省 > 0" 的最小归档段。N 是 target_turns，不是预测，是押注纪律：
-一次压缩的最坏情况是压完你再也不聊、白花这一次的 C，N 就是给这笔押注定的上限——
-几轮内打平不了，这套组合不配压。低于经济线压缩是赔钱买卖，所以它是许可线的硬下限。
-N×Pc ≤ Si 时经济线不存在：摘要模型读一遍比 N 轮省下的还贵，压多少次都赔。
+两处适配（与上游不同的地方，都在这里，没有第三处）：
+
+1. 上游的剩余轮数估计 = 剩余计划步数 × 每步实测轮数，因为它有 plan 工具。
+   聊天没有计划，改用窗口封顶值本身：horizon = (窗口 − 当前) ÷ 每轮平均增量，
+   增量从本会话历史实测；实测不出来就是 horizon_unavailable，不压。
+   首次压缩的 ×2 因此恒被窗口封顶吃掉（min(2H, H) = H），公式保留，语义如实。
+2. 上游用原生压缩，一次性成本只有缓存重写溢价。本插件的压缩是一次真实的
+   摘要模型调用，一次性成本加上：归档段按摘要模型输入价读一遍 + memo 按
+   摘要模型输出价写一遍。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-MEMO_TOKENS = 800
+# 上游 DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE
+MEMO_ESTIMATE = 1000
+# 上游 windowReserveTokens
+WINDOW_RESERVE = 16384
+# 上游 firstCompactionRequestScale / subsequentCompactionMargin
+FIRST_HORIZON_SCALE = 2.0
+SUBSEQUENT_MARGIN = 1.5
+
+# 窗口保护线触发：当前用量 ≥ 窗口 − WINDOW_RESERVE（decideCompaction 的
+# windowProtection 分支），聊天里模型可能始终不调工具，所以钩子在每个
+# provider 请求前也检查这条线并下发强制指令。
 
 
 @dataclass
-class SweetSpot:
-    keep_recent: int
-    min_archive: int = 0
-    breakeven_turns: float = 0.0  # 打平点：第几轮两条成本线相交
-    solvable: bool = True
-    reason: str = ""
-    per_round_saving: float = 0.0
+class Decision:
+    compact: bool
+    reason: str  # 与上游 CompactionReason 对齐，外加 price_unavailable
+    window_protection: bool = False
+    breakeven_requests: float | None = None
+    horizon_requests: int | None = None
+    effective_horizon: float | None = None
+    combined_breakeven: float | None = None
     one_time_cost: float = 0.0
-    floor_archive: int = 0  # 经济线：低于它的压缩是赔钱买卖
-    net_saving: float = 0.0  # N 轮净省，为负就是赔
+    per_request_saving: float = 0.0
+    saving_tokens: int = 0
+    carried_debt: float = 0.0
     detail: dict = field(default_factory=dict)
-
-    @property
-    def threshold(self) -> int:
-        return self.keep_recent + self.min_archive
 
 
 def effective_cache_read(model: dict) -> float:
@@ -45,62 +64,134 @@ def effective_cache_read(model: dict) -> float:
     return model["cache_read"] or model["input"]
 
 
-def sweet_spot(
+def one_time_cost(
     main: dict,
     summarizer: dict,
     keep_recent: int,
     archive: int,
-    target_turns: int,
-    memo_tokens: int = MEMO_TOKENS,
-) -> SweetSpot:
-    """在给定归档段上算经济账：打平点、N 轮净省、经济线。"""
+    memo: int = MEMO_ESTIMATE,
+) -> float:
+    """压一次要花的钱：重建保留段+memo 的缓存溢价 + 摘要调用本身。
+
+    重建项 = (K+M)(Pi−Pc+Pw)：新前缀先按输入价写缓存，换掉了本来可以
+    按缓存读价命中的旧前缀。适配点 2：上游没有 A·Si 和 M·So 这两项。
+    """
     pi, pw = main["input"], main["cache_write"]
     pc = effective_cache_read(main)
     si, so = summarizer["input"], summarizer["output"]
+    return (keep_recent + memo) * (pi - pc + pw) + memo * so + archive * si
 
-    fixed = (keep_recent + memo_tokens) * (pi - pc + pw) + memo_tokens * so
-    one_time = fixed + archive * si
-    saving = archive * pc
-    crossover = one_time / saving if saving > 0 else 0.0
-    net = target_turns * saving - one_time
 
-    floor = 0
-    if target_turns * pc > si:
-        floor = int(fixed / (target_turns * pc - si)) + 1
+def per_request_saving(main: dict, archive: int, memo: int = MEMO_ESTIMATE) -> float:
+    """压完之后每轮少花的钱：归档段与 memo 的差值不再按缓存读价重读。
 
-    detail = {
-        "main_input": pi,
-        "main_cache_read": pc,
-        "main_cache_write": pw,
-        "summarizer_input": si,
-        "summarizer_output": so,
-        "memo_tokens": memo_tokens,
-        "target_turns": target_turns,
-        "archive": archive,
-    }
+    对应上游 savingTokens = archiveTokens − memoTokens，换成钱。
+    """
+    return max(0, archive - memo) * effective_cache_read(main)
 
-    spot = SweetSpot(
-        keep_recent=keep_recent,
-        min_archive=archive,
-        breakeven_turns=crossover,
-        per_round_saving=saving,
-        one_time_cost=one_time,
-        floor_archive=floor,
-        net_saving=net,
-        detail=detail,
+
+def decide(
+    *,
+    write_tokens: int,
+    archive_tokens: int,
+    context_window: int,
+    keep_recent: int,
+    average_increment: float | None,
+    prior_compactions: int,
+    carried_debt: float,
+    debt_repayment: float,
+    main: dict | None,
+    summarizer: dict | None,
+    memo: int = MEMO_ESTIMATE,
+) -> Decision:
+    """在一次话题边界上判账：压，还是不压。
+
+    参数全部是现场实测或价目查表，没有一个需要用户填。
+    """
+    saving_tokens = archive_tokens - memo
+    protection = context_window > 0 and write_tokens >= context_window - WINDOW_RESERVE
+
+    if saving_tokens <= 0:
+        return Decision(
+            compact=False,
+            reason="non_positive_saving",
+            window_protection=protection,
+            saving_tokens=saving_tokens,
+            carried_debt=carried_debt,
+        )
+
+    horizon = None
+    if average_increment and average_increment > 0 and context_window > 0:
+        horizon = max(
+            0, int((context_window - write_tokens) / average_increment)
+        )
+
+    if not (main and summarizer):
+        # 对应上游 cache_ratio_unavailable：没有价目，经济判断缺席，
+        # 只剩窗口保护线能压。
+        return Decision(
+            compact=protection,
+            reason="window_protection" if protection else "price_unavailable",
+            window_protection=protection,
+            horizon_requests=horizon,
+            saving_tokens=saving_tokens,
+            carried_debt=carried_debt,
+        )
+
+    cost = one_time_cost(main, summarizer, keep_recent, archive_tokens, memo)
+    saving = per_request_saving(main, archive_tokens, memo)
+    breakeven = cost / saving if saving > 0 else None
+
+    base = Decision(
+        compact=False,
+        reason="",
+        window_protection=protection,
+        breakeven_requests=breakeven,
+        horizon_requests=horizon,
+        one_time_cost=cost,
+        per_request_saving=saving,
+        saving_tokens=saving_tokens,
+        carried_debt=carried_debt,
     )
 
-    if target_turns * pc <= si:
-        spot.solvable = False
-        spot.reason = (
-            f"摘要模型读一遍归档段的单价（${si * 1e6:.2f}/1M）不低于 {target_turns} 轮"
-            f"少花的（${target_turns * pc * 1e6:.2f}/1M），归档段多大都是赔钱。"
-            "请在核心配置里把「用于上下文压缩的模型提供商 ID」换成更便宜的模型。"
-        )
-    elif net <= 0 and (not floor or archive < floor):
-        spot.solvable = False
-        spot.reason = (
-            f"在这条线上按 {target_turns} 轮算，压缩比不压还贵 ${-net:.4f}。"
-            "把压缩线调高（归档段越大，固定成本摊得越薄），或换更便宜的压缩模型。"
-        )
-    return spot
+    if protection:
+        base.compact = True
+        base.reason = "window_protection"
+        return base
+    if horizon is None:
+        base.reason = "horizon_unavailable"
+        return base
+    if breakeven is None:
+        base.reason = "non_positive_saving"
+        return base
+
+    first = prior_compactions == 0
+    if first:
+        # min(horizon × FIRST_HORIZON_SCALE, horizon) = horizon：聊天里没有
+        # 计划边界估计，视野就是窗口封顶本身，×2 恒被吃掉。保留公式出处。
+        effective = min(horizon * FIRST_HORIZON_SCALE, horizon)
+        base.effective_horizon = effective
+        if breakeven <= effective:
+            base.compact = True
+            base.reason = "economic"
+        else:
+            base.reason = "deferred_economic"
+        return base
+
+    base.effective_horizon = horizon
+    base_ok = breakeven <= horizon
+    margin_ok = breakeven * SUBSEQUENT_MARGIN <= horizon
+    combined = (carried_debt + cost) / saving if saving > 0 else None
+    base.combined_breakeven = combined
+    debt_ok = combined is not None and combined <= horizon
+
+    if base_ok and margin_ok and debt_ok:
+        base.compact = True
+        base.reason = "economic"
+    elif base_ok and not margin_ok:
+        base.reason = "deferred_subsequent_margin"
+    elif base_ok and not debt_ok:
+        base.reason = "deferred_carried_debt"
+    else:
+        base.reason = "deferred_economic"
+    return base

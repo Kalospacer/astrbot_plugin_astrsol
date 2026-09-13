@@ -1,4 +1,9 @@
-"""SoL-Astr：让 LLM 在话题边界自主压缩旧上下文。"""
+"""SoL-Astr：让 LLM 在话题边界自主压缩旧上下文。
+
+算法移植自 NVlabs/SoL-Pi 的 online-context-compact（economics.ts），
+本文件只管装配：窗口来源、状态记账、注入提示。判账在 sol_astr/economics.py，
+会话状态在 sol_astr/state.py。
+"""
 
 from __future__ import annotations
 
@@ -15,22 +20,19 @@ from astrbot.core.utils.llm_metadata import LLM_METADATAS
 
 from .sol_astr import api, ledger
 from .sol_astr.catalog import Catalog, resolve
-from .sol_astr.economics import sweet_spot
+from .sol_astr.economics import WINDOW_RESERVE
 from .sol_astr.split import TOOL_NAME, count_tokens, strip_tool_trace
+from .sol_astr.state import SessionStates
 from .sol_astr.summarize import DEFAULT_INSTRUCTION
-from .sol_astr.tool import CALLED_FLAG, COMPACTED_FLAG, CompactContextTool
+from .sol_astr.tool import COMPACTED_FLAG, CompactContextTool
 
 PLUGIN_NAME = "astrbot_plugin_astrsol"
-ELIGIBLE_FLAG = "sol_astr_eligible"
 
-# 保留段按窗口取比例、绝对值封顶：比例保证小窗口模型也够得着（否则绝对阈值是死值），
-# 封顶保证大窗口不会留 150k 原文不压。许可线 = 内置兜底 82% 减去 10% 反应区（模型过线后
-# 不一定立刻调工具，得留几轮余量），价格只负责验收这条线划不划算。想手动定线就填
-# min_archive_tokens。
-KEEP_RATIO, KEEP_CAP = 0.15, 40000
-LINE_RATIO = 0.72
-# 归档段最多吃到摘要模型窗口的 80%，剩下的给摘要指令和 memo 输出。
-SUMM_WINDOW_RATIO = 0.8
+# 上游 DEFAULT_KEEP_RECENT_TOKENS（extension.ts:35）
+KEEP_DEFAULT = 20000
+# 核心 LLMSummaryCompressor 的触发线（compressor.py:131，默认 0.82，核心配置
+# 不暴露这个值）。它只是面板上的一根参照线：本插件的判账不使用它。
+CORE_COMPRESS_RATIO = 0.82
 
 
 class SoLAstr(Star):
@@ -39,12 +41,12 @@ class SoLAstr(Star):
         self.config = config
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
         self.ledger_path = self.data_dir / "ledger.jsonl"
+        self.states = SessionStates(self.data_dir / "state.json")
         self.catalog = Catalog(self.data_dir / "openrouter.json")
         self.tool = CompactContextTool(plugin=self)
         self.enabled = False
         self.window_source: dict[str, str] = {}
         self._model_cache: dict[str, dict | None] = {}
-        self._spot_cache: dict[tuple, object] = {}
 
     async def initialize(self) -> None:
         for route, handler, method, desc in (
@@ -135,75 +137,35 @@ class SoLAstr(Star):
             await self.catalog_entry(summarizer.get_model()) if summarizer else None,
         )
 
-    # ---------- 阈值 ----------
+    # ---------- 生效参数 ----------
 
-    async def thresholds(self, umo: str | None = None) -> dict:
-        """本次会话生效的保留段、最小归档段、窗口，以及它们各自的来源。"""
+    def keep_recent(self) -> int:
+        """保留段：配置值，默认 20000（上游 DEFAULT_KEEP_RECENT_TOKENS）。"""
+        return self.config["keep_recent_tokens"] or KEEP_DEFAULT
+
+    async def limits(self, umo: str | None = None) -> dict:
+        """本次会话的窗口与各条参照线。判账不在这里，在 economics.decide()。"""
         provider = await self.context.get_using_provider_async(umo=umo)
         window = provider.provider_config["max_context_tokens"]
         provider_id = str(provider.provider_config.get("id", ""))
-
-        keep = self.config["keep_recent_tokens"] or min(
-            KEEP_CAP, int(window * KEEP_RATIO)
-        )
-        result = {
-            "keep_recent": keep,
+        return {
+            "keep_recent": self.keep_recent(),
+            "keep_source": "配置" if self.config["keep_recent_tokens"] else "SoL 默认",
             "window": window,
             "window_source": self.window_source.get(provider_id, "provider"),
-            "keep_source": "配置" if self.config["keep_recent_tokens"] else "按窗口",
+            # 窗口 − 16384，过线无条件压（上游 windowReserveTokens）
+            "window_protection": max(0, window - WINDOW_RESERVE),
+            # 核心压缩器的触发线，只是参照：本插件不动它，它也可能先动手
+            "core_fallback": int(window * CORE_COMPRESS_RATIO),
         }
 
-        main_entry, summ_entry = await self.priced_pair(umo)
-        target = self.config["target_turns"]
-
-        def _spot(archive: int):
-            if not (main_entry and summ_entry):
-                return None
-            key = (main_entry["id"], summ_entry["id"], keep, archive, target)
-            if key not in self._spot_cache:
-                self._spot_cache[key] = sweet_spot(
-                    main_entry, summ_entry, keep, archive, target
-                )
-            return self._spot_cache[key]
-
-        if self.config["min_archive_tokens"]:
-            result["min_archive"] = self.config["min_archive_tokens"]
-            result["archive_source"] = "配置"
-        else:
-            # floor_archive 与传入的 archive 无关，先探一次拿到经济线
-            probe = _spot(0)
-            if self.config.get("economy_first") and probe and probe.floor_archive:
-                result["min_archive"] = probe.floor_archive
-                result["archive_source"] = "经济线"
-                result["sweet_spot"] = _spot(probe.floor_archive)
-                return result
-
-            line = int(window * LINE_RATIO)
-            source = "按窗口"
-            if summ_entry and summ_entry.get("context"):
-                cap = int(summ_entry["context"] * SUMM_WINDOW_RATIO)
-                if cap < line - keep:
-                    line = keep + cap
-                    source = "摘要模型窗口"
-            archive = max(line - keep, 0)
-
-            spot = _spot(archive)
-            if spot and spot.floor_archive and archive < spot.floor_archive:
-                # 低于经济线的压缩是赔钱买卖，抬到经济线
-                archive = spot.floor_archive
-                source = "经济线"
-                spot = _spot(archive)
-
-            result["min_archive"] = archive
-            result["archive_source"] = source
-            if spot:
-                result["sweet_spot"] = spot
-            return result
-
-        spot = _spot(result["min_archive"])
-        if spot:
-            result["sweet_spot"] = spot
-        return result
+    @staticmethod
+    def session_key(event: AstrMessageEvent) -> str:
+        """状态按会话记：优先 conversation cid，拿不到退回 umo。"""
+        req = event.get_extra("provider_request")
+        conversation = getattr(req, "conversation", None)
+        cid = getattr(conversation, "cid", "") or ""
+        return cid or event.unified_msg_origin
 
     # ---------- 钩子 ----------
 
@@ -253,16 +215,12 @@ class SoLAstr(Star):
         event: AstrMessageEvent,
         req: ProviderRequest,
     ) -> None:
-        """在当轮用户消息尾部追加一行上下文状态。
+        """每个 provider 请求：记一笔状态，并在当轮用户消息尾部附一行用量。
 
-        三个数一起给：当前用量、建议压缩线、模型真实上限。只给「当前/压缩线」会让
-        模型把压缩线当成容量上限——用掉 105k 明明还很宽裕，写成 105000/98400 却像
-        是已经溢出了。
-
-        体积判断交给插件、语义判断留给模型：裸报一个 token 数模型无从判断算大算小。
-
-        放在消息尾部而不是 system prompt，是为了不破坏上游的前缀缓存；这一行会随
-        历史落盘，不要剥离，否则下一轮的前缀又和缓存对不上了。
+        状态记账对应上游 recordProviderRequest，是「每轮平均增量」的数据来源。
+        注入只给两个数：当前用量、模型上限。过窗口保护线时换成强制指令——
+        聊天里模型可能始终不调工具，这条指令是窗口保护的执行臂
+        （对应上游 windowProtection 分支，economics.ts:170-172）。
         """
         if not self.enabled:
             return
@@ -270,20 +228,16 @@ class SoLAstr(Star):
         if not tokens:
             tokens = count_tokens(bind_checkpoint_messages(req.contexts))
 
-        limits = await self.thresholds(event.unified_msg_origin)
-        threshold = limits["keep_recent"] + limits["min_archive"]
-        status = (
-            f"context: 当前 {tokens} / 压缩线 {threshold} / "
-            f"模型上限 {limits['window']} tokens"
-        )
-        if tokens < threshold:
-            text = f"[{status}]"
+        self.states.record_request(self.session_key(event), tokens)
+        limits = await self.limits(event.unified_msg_origin)
+
+        if tokens < limits["window_protection"]:
+            text = f"[context: 当前 {tokens} / 模型上限 {limits['window']} tokens]"
         else:
-            event.set_extra(ELIGIBLE_FLAG, tokens)
             text = (
-                f"[{status} —— 用量过压缩线了。要是刚才那个话题聊完了、"
-                f"也没留下什么没办完的事，就调 {TOOL_NAME} 把早前的记录收一收。"
-                "还在聊同一件事就先放着。]"
+                f"[context: 当前 {tokens} / 模型上限 {limits['window']} tokens —— "
+                f"已越过窗口保护线（上限 − {WINDOW_RESERVE}）。本轮先调 {TOOL_NAME} "
+                "再回答，这不是建议。]"
             )
         req.extra_user_content_parts.append(TextPart(text=text))
 
@@ -294,10 +248,10 @@ class SoLAstr(Star):
         run_context: ContextWrapper[AstrAgentContext],
         response: LLMResponse,
     ) -> None:
-        """压缩成功就摘掉工具痕迹；够格却没被调用则记一笔。
+        """压缩成功就摘掉工具痕迹。
 
         剥离的理由：这一轮的前缀本来就因为压缩断掉了，删这对消息不额外花钱；留着
-        反而会当成样例，诱导模型下一轮接着调。没压缩的轮次不动，那句「不需要压缩」
+        反而会当成样例，诱导模型下一轮接着调。没压缩的轮次不动，那句「现在不压」
         正好是告诉模型别急着重试的信号。
         """
         if event.get_extra(COMPACTED_FLAG):
@@ -305,18 +259,6 @@ class SoLAstr(Star):
             if self.config["strip_tool_trace"]:
                 removed = strip_tool_trace(run_context.messages)
                 logger.info("SoL-Astr：已剥离 %d 条压缩工具消息。", removed)
-            return
-
-        eligible = event.get_extra(ELIGIBLE_FLAG)
-        if eligible and not event.get_extra(CALLED_FLAG):
-            ledger.append(
-                self.ledger_path,
-                {
-                    "umo": event.unified_msg_origin,
-                    "outcome": "not_called",
-                    "total_tokens": eligible,
-                },
-            )
 
     # ---------- Web API（薄壳，数据组装在 api.py）----------
 

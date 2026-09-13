@@ -231,8 +231,7 @@ function renderModels(models, status) {
   } else if (spot) {
     verdict = `<div class="verdict">在这条线上压一次花 <span class="num">${money(spot.one_time_cost)}</span>，
       之后每轮少花 <span class="num">${money(spot.per_round_saving)}</span>。
-      聊到第 <b>${spot.breakeven_turns.toFixed(1)}</b> 轮两条成本线打平，
-      按预期的 ${spot.detail.target_turns} 轮算，净省 <span class="num">${money(spot.net_saving)}</span>。</div>`;
+      最坏情况是压完你再也不聊：这笔钱白花；聊到第 <b>${spot.breakeven_turns.toFixed(1)}</b> 轮打平，之后都是净省。</div>`;
   }
 
   $("models").innerHTML =
@@ -264,7 +263,7 @@ function renderSim(models) {
     <div class="sim">
       <div>
         <div class="slider-row">
-          <div class="head"><span class="k">预期再聊轮数</span><span class="v" id="sim-n-v"></span></div>
+          <div class="head"><span class="k">假设再聊轮数</span><span class="v" id="sim-n-v"></span></div>
           <input type="range" id="sim-n" min="1" max="20" step="1" />
         </div>
         <button class="btn primary" id="sim-apply">应用到配置</button>
@@ -391,7 +390,7 @@ const FIELDS = [
   ["dry_run", "bool", "影子模式", "只记账，不调摘要、不改历史。先看触发率再关。"],
   ["keep_recent_tokens", "int", "保留段 tokens", "0 = 自动：窗口的 15%，上限 40000。"],
   ["min_archive_tokens", "int", "最小归档段 tokens", "0 = 自动：压缩线（窗口×0.72）减去保留段。手填后压缩线 = 保留段 + 这个数。"],
-  ["target_turns", "int", "预期再聊轮数", "估计话题结束后还会再聊几轮。净省 = 轮数 × 每轮少花 − 压一次成本，为负就是赔钱。"],
+  ["target_turns", "int", "几轮内打平", "压缩是押注：最坏情况是压完不再聊，白花压一次的钱。这个数是给押注定的纪律——几轮内打平不了，这套组合就不配压。"],
   ["strip_tool_trace", "bool", "剥离工具痕迹", "压缩成功那轮，落盘前删掉工具调用记录，免得模型照着复读。"],
 ];
 

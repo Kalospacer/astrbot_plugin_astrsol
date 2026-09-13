@@ -54,7 +54,8 @@ class CompactContextTool(FunctionTool):
         messages = context.messages
         event.set_extra(CALLED_FLAG, True)
 
-        keep_recent, min_archive, window = await self.plugin.thresholds(event)
+        limits = await self.plugin.thresholds(event.unified_msg_origin)
+        keep_recent, min_archive = limits["keep_recent"], limits["min_archive"]
         head = leading_system(messages)
         archive, keep = split_for_compact(messages, keep_recent)
         record = {
@@ -67,7 +68,8 @@ class CompactContextTool(FunctionTool):
             "keep_messages": len(keep),
             "keep_recent": keep_recent,
             "min_archive": min_archive,
-            "window": window,
+            "window": limits["window"],
+            "archive_source": limits["archive_source"],
         }
 
         if record["archive_tokens"] < min_archive:
@@ -83,7 +85,7 @@ class CompactContextTool(FunctionTool):
                 record, "dry_run", started, "记下了，这次先不动，接着回答用户。"
             )
 
-        provider = await self.plugin.summarize_provider(event)
+        provider = await self.plugin.summarize_provider(event.unified_msg_origin)
         memo, usage = await summarize(
             provider, archive, self.plugin.summarize_instruction()
         )

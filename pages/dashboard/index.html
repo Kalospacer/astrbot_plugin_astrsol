@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SoL-Astr</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <nav class="nav">
+      <h1>SoL-Astr</h1>
+      <span class="badge" id="mode-badge"><i class="dot"></i><span>读取中</span></span>
+      <span class="spacer"></span>
+      <button class="ghost-btn" id="refresh">刷新</button>
+    </nav>
+
+    <main>
+      <section class="hero reveal" style="--i: 0">
+        <div class="sec-head">
+          <h2>上下文压缩</h2>
+          <p id="hero-sub">正在读取运行状态…</p>
+        </div>
+        <div class="kpis" id="kpis"></div>
+        <div class="alerts" id="alerts"></div>
+      </section>
+
+      <section class="reveal" style="--i: 1">
+        <div class="sec-head">
+          <h2>上下文标尺</h2>
+          <p>
+            所有阈值和各会话的实际用量画在同一根轴上。会话游标全挤在压缩线左边，
+            说明压缩永远触发不了；压缩线贴着内置兜底线，说明插件来不及先动手。
+          </p>
+        </div>
+        <div class="card ruler-wrap">
+          <div class="ruler" id="ruler"></div>
+          <div class="legend" id="ruler-legend"></div>
+        </div>
+        <div class="card" style="margin-top: 14px" id="sessions-card">
+          <div class="empty">读取会话中…</div>
+        </div>
+      </section>
+
+      <section class="reveal" style="--i: 2">
+        <div class="sec-head">
+          <h2>模型与价目</h2>
+          <p>
+            模型名经 OpenRouter 目录解析后取真实价目，压缩线由价目反推。
+            摘要模型读一遍归档段的钱要是比省下的还多，这套组合就永远不回本。
+          </p>
+        </div>
+        <div class="card" id="models-card">
+          <div class="empty">读取价目中…</div>
+        </div>
+      </section>
+
+      <section class="reveal" style="--i: 3">
+        <div class="sec-head">
+          <h2>甜点值模拟器</h2>
+          <p>
+            拖动看压缩线怎么变。目标回本轮数越大验收越宽松、压得越早；
+            保留段越大对话记得越多，但压缩越不划算。
+          </p>
+        </div>
+        <div class="card" id="sim-card">
+          <div class="empty">等待价目…</div>
+        </div>
+      </section>
+
+      <section class="reveal" style="--i: 4">
+        <div class="sec-head">
+          <h2>运行台账</h2>
+          <p>
+            触发率是判断这插件值不值得开的首要依据：模型够格却没调用，
+            记为 not_called，它是分母的一部分。
+          </p>
+        </div>
+        <div class="card" id="ledger-card">
+          <div class="empty">读取台账中…</div>
+        </div>
+      </section>
+
+      <section class="reveal" style="--i: 5">
+        <div class="sec-head">
+          <h2>配置</h2>
+          <p>插件自己的选项可以在这里改。摘要模型和压缩提示词属于核心配置，这里只读。</p>
+        </div>
+        <div class="card" id="config-card">
+          <div class="empty">读取配置中…</div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

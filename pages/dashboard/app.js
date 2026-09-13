@@ -25,7 +25,12 @@ const esc = (s) =>
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
   );
 const fmt = (n) => (n ?? 0).toLocaleString("en-US");
-const fmtK = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n));
+const fmtK = (n) =>
+  n >= 1e6
+    ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`
+    : n >= 1000
+      ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k`
+      : String(n);
 const money = (n) => `$${n < 0.01 ? n.toFixed(5) : n.toFixed(3)}`;
 
 let state = {};
@@ -80,14 +85,33 @@ function renderStatus(status, ledger) {
 
 /* ---------------- 标尺 ---------------- */
 
+/* 对数轴：窗口上到 1M 时线性轴会把所有信息挤死在左边。轴从 10^3 开始。 */
+
+function logScale(win) {
+  const lo = 3;
+  const hi = Math.log10(Math.max(win, 10 ** (lo + 1)));
+  return (v) =>
+    Math.max(0, Math.min(1, (Math.log10(Math.max(v, 10 ** lo)) - lo) / (hi - lo)));
+}
+
 function renderRuler(sessions, source) {
   const { window: win, threshold, keep_recent, builtin_fallback, sessions: rows } = sessions;
   const W = 1000;
-  const H = 116;
-  const y = 58;
-  const x = (v) => Math.max(0, Math.min(1, v / win)) * W;
+  const H = 120;
+  const y = 54;
+  const u = logScale(win);
+  const x = (v) => u(v) * W;
 
-  $("ruler-note").textContent = `窗口 ${fmtK(win)}，来源 ${source}`;
+  $("ruler-note").textContent = `对数轴 · 窗口 ${fmtK(win)}，来源 ${source}`;
+
+  const grid = [];
+  for (let p = 3; p <= Math.floor(Math.log10(win)); p++) {
+    const gx = x(10 ** p);
+    const anchor = gx > W - 30 ? "end" : gx < 30 ? "start" : "middle";
+    const label = p < 6 ? `${10 ** (p - 3)}k` : `${10 ** (p - 6)}M`;
+    grid.push(`<line x1="${gx}" y1="${y - 24}" x2="${gx}" y2="${y + 26}" stroke="var(--line)" stroke-width="1"/>
+      <text x="${gx}" y="${y + 42}" fill="var(--ink-3)" font-size="10" font-family="var(--mono)" text-anchor="${anchor}">${label}</text>`);
+  }
 
   const zones = `
     <rect x="0" y="${y - 8}" width="${x(keep_recent)}" height="16" fill="var(--ink)" opacity="0.08"/>
@@ -98,8 +122,8 @@ function renderRuler(sessions, source) {
     <line x1="0" y1="${y + 8}" x2="${W}" y2="${y + 8}" stroke="var(--line)" stroke-width="1"/>`;
 
   const tick = (v, label, color, above) => `
-    <line x1="${x(v)}" y1="${above ? y - 20 : y + 8}" x2="${x(v)}" y2="${above ? y - 8 : y + 20}" stroke="${color}" stroke-width="1.5"/>
-    <text x="${x(v)}" y="${above ? y - 28 : y + 34}" fill="${color}" font-size="11.5"
+    <line x1="${x(v)}" y1="${above ? y - 22 : y + 8}" x2="${x(v)}" y2="${above ? y - 8 : y + 20}" stroke="${color}" stroke-width="1.5"/>
+    <text x="${x(v)}" y="${above ? y - 30 : y + 34}" fill="${color}" font-size="11.5"
       font-family="var(--mono)" text-anchor="middle">${label}</text>`;
 
   const ticks =
@@ -107,37 +131,36 @@ function renderRuler(sessions, source) {
     tick(keep_recent, `保留 ${fmtK(keep_recent)}`, "var(--ink-3)", false) +
     tick(builtin_fallback, `兜底 ${fmtK(builtin_fallback)}`, "var(--warn)", false);
 
-  const cursors = rows
-    .slice(0, 16)
-    .map(
-      (s) => `<g>
-        <line x1="${x(s.tokens)}" y1="${y - 14}" x2="${x(s.tokens)}" y2="${y + 14}" stroke="var(--accent)" stroke-width="1" opacity="0.5"/>
-        <circle cx="${x(s.tokens)}" cy="${y}" r="4.5" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
-        <title>${esc(s.title)} · ${fmt(s.tokens)} tokens</title>
-      </g>`,
-    )
+  const rugs = rows
+    .map((s) => {
+      const over = s.tokens >= threshold;
+      return `<line x1="${x(s.tokens)}" y1="${y + 10}" x2="${x(s.tokens)}" y2="${y + 26}"
+        stroke="${over ? "var(--accent)" : "var(--ink-3)"}" stroke-width="2"
+        opacity="${over ? 0.95 : 0.4}" stroke-linecap="round">
+        <title>${esc(s.title)} · ${esc(s.user_id)} · ${fmt(s.tokens)} tokens</title></line>`;
+    })
     .join("");
 
   $("ruler").innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="height:${H}px">
     <defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
       <line x1="0" y1="0" x2="0" y2="6" stroke="var(--warn)" stroke-width="1" opacity="0.4"/>
     </pattern></defs>
-    ${zones}${ticks}${cursors}
-    <text x="0" y="${y + 52}" fill="var(--ink-3)" font-size="10.5" font-family="var(--mono)">0</text>
-    <text x="${W}" y="${y + 52}" fill="var(--ink-3)" font-size="10.5" font-family="var(--mono)" text-anchor="end">${fmtK(win)}</text>
+    ${grid.join("")}${zones}${ticks}${rugs}
   </svg>`;
 
   const over = rows.filter((s) => s.tokens >= threshold).length;
-  $("ruler-legend").innerHTML = [
-    ["rgba(128,128,128,0.15)", "保留段", "压缩后原样留下的最近对话"],
-    ["var(--accent-soft)", "可压缩区", `${over} 个会话已进`],
-    ["var(--warn-bg)", "内置兜底区", "到这里核心自己动手"],
-  ]
-    .map(
-      ([c, k, v]) =>
-        `<div class="legend-item"><span class="swatch" style="background:${c}"></span><b>${k}</b> ${v}</div>`,
-    )
-    .join("");
+  $("ruler-legend").innerHTML =
+    [
+      ["rgba(128,128,128,0.15)", "保留段", "压缩后原样留下的最近对话"],
+      ["var(--accent-soft)", "可压缩区", `${over} 个会话已过线`],
+      ["var(--warn-bg)", "内置兜底区", "到这里核心自己动手"],
+    ]
+      .map(
+        ([c, k, v]) =>
+          `<div class="legend-item"><span class="swatch" style="background:${c}"></span><b>${k}</b> ${v}</div>`,
+      )
+      .join("") +
+    `<div class="legend-item">竖线 = 会话用量，紫色已过线</div>`;
 }
 
 /* ---------------- 会话 ---------------- */
@@ -150,7 +173,10 @@ function renderSessions(sessions) {
          .slice(0, 12)
          .map((s) => {
            const gap = threshold - s.tokens;
-           return `<tr><td>${esc(s.title)}</td>
+           const named = s.title && s.title !== "未命名会话";
+           return `<tr><td>${esc(named ? s.title : s.user_id)}${
+             named ? `<div class="umo">${esc(s.user_id)}</div>` : ""
+           }</td>
              <td class="right num">${fmt(s.tokens)}</td>
              <td class="right num" style="color:${gap <= 0 ? "var(--accent)" : "var(--ink-3)"}">
                ${gap <= 0 ? "已过线" : `还差 ${fmt(gap)}`}</td></tr>`;
@@ -269,7 +295,7 @@ function renderSim(models) {
     const r = computeSpot(models.main, models.summarizer, k, n, memo);
 
     const W = 1000;
-    const x = (v) => Math.max(0, Math.min(1, v / win)) * W;
+    const x = (v) => logScale(win)(v) * W;
     $("sim-ruler").innerHTML = `<svg viewBox="0 0 ${W} 30" style="height:30px">
       <rect x="0" y="12" width="${W}" height="6" fill="var(--ink)" opacity="0.06"/>
       ${r.solvable ? `<rect x="${x(k)}" y="12" width="${Math.max(0, x(r.threshold) - x(k))}" height="6" fill="var(--accent)" opacity="0.5"/>` : ""}

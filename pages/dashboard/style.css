@@ -398,6 +398,14 @@ td.num {
   font-size: 12.5px;
 }
 
+.umo {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-top: 2px;
+  word-break: break-all;
+}
+
 /* ---------- 价目 ---------- */
 
 .models {

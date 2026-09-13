@@ -69,8 +69,14 @@ function renderStatus(status, ledger) {
         : "生效中。话题翻篇时模型叫插件算账：划算就压；越过窗口保护线无条件压。";
 
   const rate = ledger.total ? `${(ledger.compact_rate * 100).toFixed(0)}%` : "—";
+  const core = status.core;
+  const coreGoverns =
+    core.overflow_strategy === "llm_compress" && t.core_fallback < t.window_protection;
+  const protNote = coreGoverns
+    ? `核心 ${fmtK(t.core_fallback)} 先动手，它管不上`
+    : `窗口 − ${fmt(status.constants.window_reserve)}，过线必压`;
   const cells = [
-    ["窗口保护线", fmtK(t.window_protection), "tokens", `窗口 − ${fmt(status.constants.window_reserve)}，过线必压`],
+    ["窗口保护线", fmtK(t.window_protection), "tokens", protNote],
     ["窗口", fmtK(t.window), "tokens", `来源 ${esc(t.window_source)}`],
     ["压缩率", rate, "", ledger.total ? `${ledger.total} 次判账` : "还没数据"],
     [

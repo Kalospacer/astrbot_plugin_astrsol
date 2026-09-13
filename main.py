@@ -170,6 +170,14 @@ class SoLAstr(Star):
             result["min_archive"] = self.config["min_archive_tokens"]
             result["archive_source"] = "配置"
         else:
+            # floor_archive 与传入的 archive 无关，先探一次拿到经济线
+            probe = _spot(0)
+            if self.config.get("economy_first") and probe and probe.floor_archive:
+                result["min_archive"] = probe.floor_archive
+                result["archive_source"] = "经济线"
+                result["sweet_spot"] = _spot(probe.floor_archive)
+                return result
+
             line = int(window * LINE_RATIO)
             source = "按窗口"
             if summ_entry and summ_entry.get("context"):

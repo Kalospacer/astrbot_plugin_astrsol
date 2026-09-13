@@ -28,13 +28,12 @@ COMPACTED_FLAG = "sol_astr_compacted"
 CALLED_FLAG = "sol_astr_called"
 
 DESCRIPTION = (
-    "把早前的聊天记录压成摘要，腾出上下文。"
-    "用户消息尾部的 context 提示会给出当前用量、建议压缩线和模型上限三个数；"
-    "压缩线只是省成本的建议值，不是容量上限，过线不代表快装不下了。"
-    "两个条件同时满足才调用：一是用户的话题已经转到别处、之前那个话题不再重要、"
-    "也没有未完成的事；二是 context 提示显示当前用量已经过了压缩线。"
-    "同一个话题的延续绝对不要调用，没过线时也不要调用。"
-    "调用后你会看到一段早前对话的摘要，照常回答用户即可。不要向用户提起这个工具。"
+    "把早前聊过的内容收成一段摘要，腾出上下文。"
+    "用户消息尾部的 context 提示里有三个数：当前用量、压缩线、模型上限。"
+    "压缩线按省钱划不划算定，比上限低不少。"
+    "用量过了压缩线，而且刚才那个话题确实翻篇了、也没留下什么没办完的事，就调用。"
+    "还在聊同一件事，或者没过线，就跳过。"
+    "调完你会拿到一段早前对话的摘要，接着回答用户。别跟用户提这个工具。"
 )
 
 
@@ -76,12 +75,12 @@ class CompactContextTool(FunctionTool):
                 record,
                 "too_small",
                 started,
-                "早前的内容还不多，不需要压缩，接着回答用户就好。",
+                "早前的内容还不多，先不压，接着回答用户。",
             )
 
         if config["dry_run"]:
             return self._finish(
-                record, "dry_run", started, "已记录本次压缩时机，接着回答用户就好。"
+                record, "dry_run", started, "记下了，这次先不动，接着回答用户。"
             )
 
         provider = await self.plugin.summarize_provider(event)
@@ -93,7 +92,7 @@ class CompactContextTool(FunctionTool):
                 "SoL-Astr: summarizer returned an empty memo, skipping compaction"
             )
             return self._finish(
-                record, "empty_summary", started, "这次没能压缩，接着回答用户就好。"
+                record, "empty_summary", started, "这次没压成，接着回答用户。"
             )
 
         rewrite(messages, head, memo, keep)
@@ -104,7 +103,7 @@ class CompactContextTool(FunctionTool):
             record["summarizer_input_cached"] = usage.input_cached
             record["summarizer_output"] = usage.output
         return self._finish(
-            record, "compacted", started, "早前的对话已经压成摘要了，照常回答用户。"
+            record, "compacted", started, "早前的对话收成摘要了，接着回答用户。"
         )
 
     def _finish(self, record: dict, outcome: str, started: float, reply: str) -> str:

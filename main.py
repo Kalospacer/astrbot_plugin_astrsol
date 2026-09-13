@@ -140,15 +140,17 @@ class SoLAstr(Star):
 
         keep, min_archive, window = await self.thresholds(event)
         threshold = keep + min_archive
-        status = f"context: 当前 {tokens} / 建议压缩线 {threshold} / 模型上限 {window} tokens"
+        status = (
+            f"context: 当前 {tokens} / 压缩线 {threshold} / 模型上限 {window} tokens"
+        )
         if tokens < threshold:
             text = f"[{status}]"
         else:
             event.set_extra(ELIGIBLE_FLAG, tokens)
             text = (
-                f"[{status} —— 已过压缩线。这条线是省成本的建议值，不是容量上限。"
-                f"如果刚才那个话题确实聊完了、没有还没办的事，就调用 {TOOL_NAME}；"
-                "还在同一个话题里就别调。]"
+                f"[{status} —— 用量过压缩线了。要是刚才那个话题聊完了、"
+                f"也没留下什么没办完的事，就调 {TOOL_NAME} 把早前的记录收一收。"
+                "还在聊同一件事就先放着。]"
             )
         req.extra_user_content_parts.append(TextPart(text=text))
 

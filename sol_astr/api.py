@@ -131,7 +131,6 @@ async def status(plugin) -> dict:
             "keep_source": limits["keep_source"],
             "archive_source": limits["archive_source"],
             "window_source": limits["window_source"],
-            "ratio": plugin.config.get("threshold_ratio", 0.72),
         },
         "sweet_spot": _spot_view(spot),
         "config": {k: plugin.config[k] for k in plugin.config.keys()},

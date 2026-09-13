@@ -264,10 +264,6 @@ function renderSim(models) {
     <div class="sim">
       <div>
         <div class="slider-row">
-          <div class="head"><span class="k">压缩线比例</span><span class="v" id="sim-r-v"></span></div>
-          <input type="range" id="sim-r" min="0.3" max="0.8" step="0.01" />
-        </div>
-        <div class="slider-row">
           <div class="head"><span class="k">预期再聊轮数</span><span class="v" id="sim-n-v"></span></div>
           <input type="range" id="sim-n" min="1" max="20" step="1" />
         </div>
@@ -279,21 +275,17 @@ function renderSim(models) {
       </div>
     </div>`;
 
-  const rEl = $("sim-r");
   const nEl = $("sim-n");
-  rEl.value = state.status.thresholds.ratio ?? 0.72;
   nEl.value = state.status.config.target_turns;
 
   const win = state.status.thresholds.window;
   const keep = state.status.thresholds.keep_recent;
+  const line = state.sessions.threshold;
+  const archive = Math.max(line - keep, 0);
   const builtin = state.sessions.builtin_fallback || win;
 
   const update = () => {
-    const ratio = +rEl.value;
     const n = +nEl.value;
-    const line = Math.round(win * ratio);
-    const archive = Math.max(line - keep, 0);
-    $("sim-r-v").textContent = `${(ratio * 100).toFixed(0)}%`;
     $("sim-n-v").textContent = n;
     const r = computeEval(models.main, models.summarizer, keep, archive, memo);
 
@@ -318,7 +310,6 @@ function renderSim(models) {
         <span class="v" style="color:${net > 0 ? "var(--ok)" : "var(--danger)"}">${money(net)}</span></div>`;
   };
 
-  rEl.addEventListener("input", update);
   nEl.addEventListener("input", update);
   update();
 
@@ -327,7 +318,6 @@ function renderSim(models) {
     btn.disabled = true;
     btn.textContent = "保存中…";
     await bridge.apiPost("config", {
-      threshold_ratio: +rEl.value,
       target_turns: +nEl.value,
     });
     btn.textContent = "已应用";
@@ -400,8 +390,7 @@ const FIELDS = [
   ["enable_compact", "bool", "启用 SoL-Astr", "关掉后模型看不到压缩工具，插件不介入。"],
   ["dry_run", "bool", "影子模式", "只记账，不调摘要、不改历史。先看触发率再关。"],
   ["keep_recent_tokens", "int", "保留段 tokens", "0 = 自动：窗口的 15%，上限 40000。"],
-  ["min_archive_tokens", "int", "最小归档段 tokens", "0 = 自动：压缩线（窗口×比例）减去保留段。手填后压缩线 = 保留段 + 这个数。"],
-  ["threshold_ratio", "float", "压缩线比例", "压缩线 = 窗口 × 这个比例，默认 0.72。给内置 82% 兜底留反应区。"],
+  ["min_archive_tokens", "int", "最小归档段 tokens", "0 = 自动：压缩线（窗口×0.72）减去保留段。手填后压缩线 = 保留段 + 这个数。"],
   ["target_turns", "int", "预期再聊轮数", "估计话题结束后还会再聊几轮。净省 = 轮数 × 每轮少花 − 压一次成本，为负就是赔钱。"],
   ["strip_tool_trace", "bool", "剥离工具痕迹", "压缩成功那轮，落盘前删掉工具调用记录，免得模型照着复读。"],
 ];

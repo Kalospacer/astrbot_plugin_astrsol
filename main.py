@@ -24,10 +24,11 @@ PLUGIN_NAME = "astrbot_plugin_astrsol"
 ELIGIBLE_FLAG = "sol_astr_eligible"
 
 # 保留段按窗口取比例、绝对值封顶：比例保证小窗口模型也够得着（否则绝对阈值是死值），
-# 封顶保证大窗口不会留 150k 原文不压。压缩线按窗口比例画（threshold_ratio），
-# 价格只负责验收这条线划不划算，不决定线的位置。
+# 封顶保证大窗口不会留 150k 原文不压。许可线 = 内置兜底 82% 减去 10% 反应区（模型过线后
+# 不一定立刻调工具，得留几轮余量），价格只负责验收这条线划不划算。想手动定线就填
+# min_archive_tokens。
 KEEP_RATIO, KEEP_CAP = 0.15, 40000
-DEFAULT_THRESHOLD_RATIO = 0.72
+LINE_RATIO = 0.72
 # 归档段最多吃到摘要模型窗口的 80%，剩下的给摘要指令和 memo 输出。
 SUMM_WINDOW_RATIO = 0.8
 
@@ -169,9 +170,7 @@ class SoLAstr(Star):
             result["min_archive"] = self.config["min_archive_tokens"]
             result["archive_source"] = "配置"
         else:
-            line = int(
-                window * self.config.get("threshold_ratio", DEFAULT_THRESHOLD_RATIO)
-            )
+            line = int(window * LINE_RATIO)
             source = "按窗口"
             if summ_entry and summ_entry.get("context"):
                 cap = int(summ_entry["context"] * SUMM_WINDOW_RATIO)
